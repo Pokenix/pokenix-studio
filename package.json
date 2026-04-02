@@ -1,0 +1,66 @@
+{
+  "name": "pokenix-studio",
+  "productName": "Pokenix Studio",
+  "version": "0.1.4",
+  "description": "Pokenix Studio - modular desktop productivity hub",
+  "author": "Demir <demirk2@pokenix.com>",
+  "homepage": "https://pokenix.com/studio",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pokenix/pokenix-studio.git"
+  },
+  "license": "MIT",
+  "main": "dist-electron/main.js",
+  "private": true,
+  "build": {
+    "appId": "com.pokenix.studio",
+    "productName": "Pokenix Studio",
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "assets/**"
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    }
+  },
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"tsc -p electron/tsconfig.json -w\" \"wait-on dist-electron/main.js dist-electron/preload.js dist-electron/runtime-config.js tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build": "npm run typecheck && npm run build:renderer && npm run build:electron",
+    "start": "electron .",
+    "dist": "npm run build && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "autoprefixer": "^10.4.27",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^40.8.0",
+    "electron-builder": "^26.8.1",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "wait-on": "^9.0.4"
+  },
+  "dependencies": {
+    "electron-log": "^5.4.3",
+    "electron-store": "^11.0.2",
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "zustand": "^5.0.11"
+  }
+}

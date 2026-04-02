@@ -1,0 +1,58 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+dist-electron/
+build/
+release/
+out/
+
+# packaging artifacts
+*.dmg
+*.exe
+*.msi
+*.AppImage
+*.deb
+*.rpm
+*.zip
+*.7z
+*.blockmap
+latest*.yml
+
+# logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# environment files
+.env
+.env.local
+.env.*.local
+
+# caches
+.cache/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# temp files
+*.pid
+*.seed
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# editors and local tooling
+.idea/
+.vscode/
+.codex/
+
+# local plugin templates
+plugin_templates/
