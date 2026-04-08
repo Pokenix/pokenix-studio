@@ -11,6 +11,15 @@ const hubAPI = {
     modules: {
         open: (moduleId) => electron_1.ipcRenderer.invoke("module:open", moduleId)
     },
+    todos: {
+        list: () => electron_1.ipcRenderer.invoke("todos:list"),
+        add: (text) => electron_1.ipcRenderer.invoke("todos:add", text),
+        toggle: (id) => electron_1.ipcRenderer.invoke("todos:toggle", id),
+        delete: (id) => electron_1.ipcRenderer.invoke("todos:delete", id),
+        reorder: (orderedIds) => electron_1.ipcRenderer.invoke("todos:reorder", orderedIds),
+        setMoveCompletedToBottom: (value) => electron_1.ipcRenderer.invoke("todos:set-move-completed-to-bottom", value),
+        clearCompleted: () => electron_1.ipcRenderer.invoke("todos:clear-completed")
+    },
     plugins: {
         status: () => electron_1.ipcRenderer.invoke("plugins:status"),
         enable: () => electron_1.ipcRenderer.invoke("plugins:enable"),
@@ -52,6 +61,7 @@ const hubAPI = {
     app: {
         version: () => electron_1.ipcRenderer.invoke("app:version"),
         openWebsite: () => electron_1.ipcRenderer.invoke("app:open-website"),
+        openExternalUrl: (url) => electron_1.ipcRenderer.invoke("app:open-external-url", url),
         onNavigate: (callback) => {
             const listener = (_event, page) => {
                 callback(page);
@@ -68,6 +78,17 @@ const hubAPI = {
     utility: {
         chooseDirectory: () => electron_1.ipcRenderer.invoke("utility:choose-directory"),
         openDirectory: (directoryPath) => electron_1.ipcRenderer.invoke("utility:open-directory", directoryPath),
+        startFileWatcher: (directoryPath) => electron_1.ipcRenderer.invoke("utility:start-file-watcher", directoryPath),
+        stopFileWatcher: () => electron_1.ipcRenderer.invoke("utility:stop-file-watcher"),
+        onFileWatcherEvent: (callback) => {
+            const listener = (_event, payload) => {
+                callback(payload);
+            };
+            electron_1.ipcRenderer.on("utility:file-watcher-event", listener);
+            return () => {
+                electron_1.ipcRenderer.removeListener("utility:file-watcher-event", listener);
+            };
+        },
         getDirectoryItemCount: (directoryPath) => electron_1.ipcRenderer.invoke("utility:get-directory-item-count", directoryPath),
         getDirectoryTree: (directoryPath, options) => electron_1.ipcRenderer.invoke("utility:get-directory-tree", directoryPath, options),
         validateDirectoryName: (name) => electron_1.ipcRenderer.invoke("utility:validate-directory-name", name),

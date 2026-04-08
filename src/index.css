@@ -675,6 +675,145 @@ body.light-theme .utility-code-block {
   cursor: pointer;
 }
 
+.utility-split-inputs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.todo-input-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.todo-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.todo-item-dragging {
+  opacity: 0.6;
+  border: 1px dashed rgba(58, 190, 255, 0.45);
+}
+
+.todo-item-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.todo-item-main input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #3abeff;
+  cursor: pointer;
+}
+
+.todo-item-text {
+  word-break: break-word;
+}
+
+.todo-item-text-completed {
+  color: #94a3b8;
+  text-decoration: line-through;
+}
+
+.todo-item-link {
+  color: #7dd3fc;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.todo-item-link-completed {
+  color: #94a3b8;
+}
+
+.todo-settings-item {
+  margin-bottom: 14px;
+}
+
+.color-preview-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.color-preview-swatch {
+  width: 120px;
+  height: 120px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+}
+
+.color-preview-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.color-preview-meta strong {
+  font-size: 22px;
+  color: #f8fafc;
+}
+
+.color-preview-meta p {
+  margin: 0;
+}
+
+.color-preview-swatch:focus-visible {
+  outline: 2px solid #3abeff;
+  outline-offset: 3px;
+}
+
+.color-picker-hidden-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.light-theme .color-preview-swatch {
+  border: 1px solid rgba(17, 24, 39, 0.08);
+}
+
+body.light-theme .color-preview-meta strong {
+  color: #111827;
+}
+
+body.light-theme .todo-item {
+  background: rgba(15, 23, 42, 0.04);
+}
+
+body.light-theme .todo-item-text-completed {
+  color: #6b7280;
+}
+
+body.light-theme .todo-item-link {
+  color: #0369a1;
+}
+
+body.light-theme .todo-item-link-completed {
+  color: #6b7280;
+}
+
+
 body.light-theme .utility-toggle-item {
   color: #111827;
 }

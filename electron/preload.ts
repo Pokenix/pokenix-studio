@@ -12,7 +12,19 @@ const hubAPI = {
   },
 
   modules: {
-    open: (moduleId: "notepad" | "utility-tools") => ipcRenderer.invoke("module:open", moduleId)
+    open: (moduleId: "notepad" | "todo-list" | "utility-tools") =>
+      ipcRenderer.invoke("module:open", moduleId)
+  },
+
+  todos: {
+    list: () => ipcRenderer.invoke("todos:list"),
+    add: (text: string) => ipcRenderer.invoke("todos:add", text),
+    toggle: (id: string) => ipcRenderer.invoke("todos:toggle", id),
+    delete: (id: string) => ipcRenderer.invoke("todos:delete", id),
+    reorder: (orderedIds: string[]) => ipcRenderer.invoke("todos:reorder", orderedIds),
+    setMoveCompletedToBottom: (value: boolean) =>
+      ipcRenderer.invoke("todos:set-move-completed-to-bottom", value),
+    clearCompleted: () => ipcRenderer.invoke("todos:clear-completed")
   },
 
   plugins: {
@@ -75,6 +87,7 @@ const hubAPI = {
   app: {
     version: () => ipcRenderer.invoke("app:version"),
     openWebsite: () => ipcRenderer.invoke("app:open-website"),
+    openExternalUrl: (url: string) => ipcRenderer.invoke("app:open-external-url", url),
     onNavigate: (callback: (page: "home" | "plugins" | "themes" | "settings" | "console") => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
@@ -98,6 +111,19 @@ const hubAPI = {
   utility: {
     chooseDirectory: () => ipcRenderer.invoke("utility:choose-directory"),
     openDirectory: (directoryPath: string) => ipcRenderer.invoke("utility:open-directory", directoryPath),
+    startFileWatcher: (directoryPath: string) => ipcRenderer.invoke("utility:start-file-watcher", directoryPath),
+    stopFileWatcher: () => ipcRenderer.invoke("utility:stop-file-watcher"),
+    onFileWatcherEvent: (callback: (payload: { message: string }) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { message: string }) => {
+        callback(payload)
+      }
+
+      ipcRenderer.on("utility:file-watcher-event", listener)
+
+      return () => {
+        ipcRenderer.removeListener("utility:file-watcher-event", listener)
+      }
+    },
     getDirectoryItemCount: (directoryPath: string) =>
       ipcRenderer.invoke("utility:get-directory-item-count", directoryPath),
     getDirectoryTree: (

@@ -10,7 +10,7 @@ import {
   WebContents
 } from "electron"
 import path from "node:path"
-import { constants } from "node:fs"
+import { constants, watch as fsWatch, type FSWatcher } from "node:fs"
 import fs from "node:fs/promises"
 import { createRequire } from "node:module"
 import { spawn } from "node:child_process"
@@ -24,6 +24,14 @@ let tray: Tray | null = null
 let isQuitting = false
 
 const moduleWindows = new Map<string, BrowserWindow>()
+const utilityWatchers = new Map<
+  number,
+  {
+    watcher: FSWatcher
+    path: string
+    knownEntries: Map<string, "file" | "directory">
+  }
+>()
 const isDev = !!process.env.VITE_DEV_SERVER_URL
 const forceCloseWindowIds = new Set<number>()
 const notepadDirtyState = new Map<number, boolean>()
@@ -43,9 +51,22 @@ type NotesStore = {
   notepadFilePath: string
 }
 
+type TodoItem = {
+  id: string
+  text: string
+  completed: boolean
+  createdAt: number
+}
+
+type TodosStore = {
+  items: TodoItem[]
+  moveCompletedToBottom: boolean
+}
+
 type PluginStore = {
   pluginsEnabled: boolean
   disabledPluginIds: string[]
+  approvedUnsafePermissions: Record<string, string[]>
 }
 
 type WindowState = {
@@ -76,6 +97,52 @@ type PluginManifest = {
   entry: string
   style?: string
   dependencies?: Record<string, string>
+  permissions?: string[]
+}
+
+const PLUGIN_PERMISSION_RULES: Record<
+  string,
+  {
+    safe: boolean
+    description: string
+  }
+> = {
+  ui: {
+    safe: true,
+    description: "Show interface elements inside the plugin window."
+  },
+  storage: {
+    safe: true,
+    description: "Read and save the plugin's own local data."
+  },
+  clipboard: {
+    safe: true,
+    description: "Copy data to and read data from the clipboard."
+  },
+  notifications: {
+    safe: true,
+    description: "Show in-app notifications."
+  },
+  filesystem: {
+    safe: false,
+    description: "Read, write, create, move, or delete files and folders on this computer."
+  },
+  network: {
+    safe: false,
+    description: "Send or receive data over the internet or a local network."
+  },
+  process: {
+    safe: false,
+    description: "Start or control system processes."
+  },
+  native_modules: {
+    safe: false,
+    description: "Load advanced or native modules with deeper system access."
+  },
+  external_links: {
+    safe: false,
+    description: "Open links or other content outside Pokenix Studio."
+  }
 }
 
 type PluginRecord = {
@@ -99,6 +166,7 @@ const defaultSettings: SettingsStore = {
 
 let settingsStore: StoreLike<SettingsStore>
 let notesStore: StoreLike<NotesStore>
+let todosStore: StoreLike<TodosStore>
 let windowStateStore: StoreLike<WindowStateStore>
 let pluginStore: StoreLike<PluginStore>
 
@@ -118,11 +186,20 @@ async function initStores() {
     }
   }) as StoreLike<NotesStore>
 
+  todosStore = new Store<TodosStore>({
+    name: "todos",
+    defaults: {
+      items: [],
+      moveCompletedToBottom: true
+    }
+  }) as StoreLike<TodosStore>
+
   pluginStore = new Store<PluginStore>({
     name: "plugins",
     defaults: {
       pluginsEnabled: false,
-      disabledPluginIds: []
+      disabledPluginIds: [],
+      approvedUnsafePermissions: {}
     }
   }) as StoreLike<PluginStore>
 
@@ -510,9 +587,57 @@ function closePluginWindow(pluginId: string) {
   return { success: true }
 }
 
+function normalizePluginPermissions(permissions: unknown) {
+  if (!Array.isArray(permissions)) return []
+
+  return permissions
+    .filter((permission): permission is string => typeof permission === "string")
+    .map((permission) => permission.trim())
+    .filter(Boolean)
+}
+
+function getUnsafePluginPermissions(plugin: PluginManifest) {
+  return normalizePluginPermissions(plugin.permissions).filter(
+    (permission) => !PLUGIN_PERMISSION_RULES[permission]?.safe
+  )
+}
+
+function formatUnsafePermissionDetails(permissions: string[]) {
+  return permissions
+    .map((permission) => {
+      const rule = PLUGIN_PERMISSION_RULES[permission]
+      if (!rule) {
+        return `- ${permission}: Unknown permission. Treated as unsafe by default.`
+      }
+
+      return `- ${permission}: ${rule.description}`
+    })
+    .join("\n")
+}
+
+function getApprovedUnsafePermissions(pluginId: string) {
+  const approvals = pluginStore.get("approvedUnsafePermissions") || {}
+  return Array.isArray(approvals[pluginId]) ? approvals[pluginId] : []
+}
+
+function setApprovedUnsafePermissions(pluginId: string, permissions: string[]) {
+  const approvals = pluginStore.get("approvedUnsafePermissions") || {}
+  pluginStore.set("approvedUnsafePermissions", {
+    ...approvals,
+    [pluginId]: permissions
+  })
+}
+
+function clearApprovedUnsafePermissions(pluginId: string) {
+  const approvals = { ...(pluginStore.get("approvedUnsafePermissions") || {}) }
+  delete approvals[pluginId]
+  pluginStore.set("approvedUnsafePermissions", approvals)
+}
+
 function disablePluginsGlobally() {
   pluginStore.set("pluginsEnabled", false)
   pluginStore.set("disabledPluginIds", [])
+  pluginStore.set("approvedUnsafePermissions", {})
 
   for (const [windowKey, win] of moduleWindows.entries()) {
     if (!windowKey.startsWith("plugin:")) continue
@@ -615,7 +740,8 @@ async function readPluginRecord(pluginDirectory: string): Promise<PluginRecord |
         description: manifest.description,
         entry: manifest.entry,
         style: manifest.style,
-        dependencies: manifest.dependencies
+        dependencies: manifest.dependencies,
+        permissions: normalizePluginPermissions(manifest.permissions)
       }
     }
   } catch {
@@ -720,6 +846,7 @@ async function deletePlugin(pluginId: string) {
     await fs.rm(pluginRecord.directory, { recursive: true, force: true })
     await fs.rm(getPluginRuntimeDirectory(pluginId), { recursive: true, force: true })
     setPluginDisabled(pluginId, false)
+    clearApprovedUnsafePermissions(pluginId)
 
     const windowKey = `plugin:${pluginId}`
     const win = moduleWindows.get(windowKey)
@@ -1526,6 +1653,39 @@ async function createPluginWindow(pluginId: string) {
   const pluginData = await getPluginById(pluginId)
   if (!pluginData) return false
 
+  const unsafePermissions = getUnsafePluginPermissions(pluginData.plugin)
+  if (unsafePermissions.length > 0) {
+    const approvedPermissions = getApprovedUnsafePermissions(pluginData.plugin.id)
+    const missingApprovals = unsafePermissions.filter(
+      (permission) => !approvedPermissions.includes(permission)
+    )
+
+    if (missingApprovals.length > 0) {
+      const result = await dialog.showMessageBox({
+        type: "warning",
+        buttons: ["Allow", "Disable Plugin", "Cancel"],
+        defaultId: 2,
+        cancelId: 2,
+        title: "Unsafe plugin permissions",
+        message: `${pluginData.plugin.name} requests unsafe permissions.`,
+        detail: `This plugin wants access to:\n${formatUnsafePermissionDetails(missingApprovals)}\n\nOnly allow this if you trust the plugin author.`
+      })
+
+      if (result.response === 1) {
+        setPluginDisabled(pluginData.plugin.id, true)
+        return false
+      }
+
+      if (result.response !== 0) {
+        return false
+      }
+
+      setApprovedUnsafePermissions(pluginData.plugin.id, [
+        ...new Set([...approvedPermissions, ...missingApprovals])
+      ])
+    }
+  }
+
   try {
     const dependencyState = await ensurePluginDependencies(pluginData.plugin)
     if (!dependencyState.success) {
@@ -1650,6 +1810,52 @@ function createTray() {
   tray.on("right-click", showTrayMenu)
 }
 
+function stopUtilityWatcher(webContentsId: number) {
+  const current = utilityWatchers.get(webContentsId)
+  if (!current) {
+    return { success: true }
+  }
+
+  current.watcher.close()
+  utilityWatchers.delete(webContentsId)
+  return { success: true }
+}
+
+async function collectDirectoryEntries(
+  rootPath: string,
+  currentPath: string,
+  knownEntries: Map<string, "file" | "directory">
+) {
+  const entries = await fs.readdir(currentPath, { withFileTypes: true })
+
+  for (const entry of entries) {
+    const absolutePath = path.join(currentPath, entry.name)
+    const relativePath = path.relative(rootPath, absolutePath)
+
+    if (!relativePath) {
+      continue
+    }
+
+    if (entry.isDirectory()) {
+      knownEntries.set(relativePath, "directory")
+      await collectDirectoryEntries(rootPath, absolutePath, knownEntries)
+      continue
+    }
+
+    knownEntries.set(relativePath, "file")
+  }
+}
+
+function applyTodoOrdering(items: TodoItem[], moveCompletedToBottom: boolean) {
+  if (!moveCompletedToBottom) {
+    return items
+  }
+
+  const activeItems = items.filter((item) => !item.completed)
+  const completedItems = items.filter((item) => item.completed)
+  return [...activeItems, ...completedItems]
+}
+
 function registerIpcHandlers() {
   ipcMain.handle("app:version", () => {
     return app.getVersion()
@@ -1657,6 +1863,17 @@ function registerIpcHandlers() {
 
   ipcMain.handle("app:open-website", async () => {
     await shell.openExternal("https://www.pokenix.com/studio")
+    return { success: true }
+  })
+
+  ipcMain.handle("app:open-external-url", async (_event, url: string) => {
+    const normalizedUrl = String(url || "").trim()
+
+    if (!/^https?:\/\//i.test(normalizedUrl)) {
+      return { success: false }
+    }
+
+    await shell.openExternal(normalizedUrl)
     return { success: true }
   })
 
@@ -1838,6 +2055,7 @@ function registerIpcHandlers() {
   ipcMain.handle("module:open", (_event, moduleId: string) => {
     const moduleMap: Record<string, string> = {
       notepad: "Notepad",
+      "todo-list": "To-Do List",
       "utility-tools": "Utility Tools"
     }
 
@@ -1917,6 +2135,179 @@ function registerIpcHandlers() {
 
     await shell.openPath(normalizedDirectoryPath)
     return { success: true }
+  })
+
+  ipcMain.handle("utility:start-file-watcher", async (event, directoryPath: string) => {
+    const normalizedDirectoryPath = String(directoryPath || "").trim()
+    if (!normalizedDirectoryPath) {
+      return {
+        success: false,
+        error: "Choose a path first."
+      }
+    }
+
+    try {
+      const stat = await fs.stat(normalizedDirectoryPath)
+      if (!stat.isDirectory()) {
+        return {
+          success: false,
+          error: "The selected path is not a directory."
+        }
+      }
+
+      await fs.access(normalizedDirectoryPath, constants.R_OK)
+    } catch (error) {
+      const code = String((error as NodeJS.ErrnoException)?.code || "")
+
+      if (code === "ENOENT") {
+        return {
+          success: false,
+          error: "The selected path does not exist anymore."
+        }
+      }
+
+      if (code === "EACCES" || code === "EPERM") {
+        return {
+          success: false,
+          error: "Pokenix Studio does not have permission to read that path."
+        }
+      }
+
+      return {
+        success: false,
+        error: "Could not watch the selected path."
+      }
+    }
+
+    stopUtilityWatcher(event.sender.id)
+
+    const sendWatcherEvent = (message: string) => {
+      if (event.sender.isDestroyed()) return
+      event.sender.send("utility:file-watcher-event", {
+        message
+      })
+    }
+
+    const knownEntries = new Map<string, "file" | "directory">()
+
+    try {
+      await collectDirectoryEntries(normalizedDirectoryPath, normalizedDirectoryPath, knownEntries)
+    } catch {
+      return {
+        success: false,
+        error: "Could not read the selected path."
+      }
+    }
+
+    const watcher = fsWatch(normalizedDirectoryPath, { recursive: true }, async (eventType, fileName) => {
+      const displayName = typeof fileName === "string" && fileName.trim() ? fileName : "(unknown item)"
+      const relativePath = typeof fileName === "string" && fileName.trim() ? path.normalize(fileName) : null
+      const targetPath =
+        typeof fileName === "string" && fileName.trim()
+          ? path.join(normalizedDirectoryPath, fileName)
+          : null
+
+      const formatEventMessage = (
+        action: "Created" | "Deleted" | "Modified" | "Changed",
+        itemType?: "file" | "directory"
+      ) => {
+        const formattedName = itemType === "directory" ? `${displayName}/` : displayName
+
+        if (!itemType) {
+          return `${action}: ${formattedName}`
+        }
+
+        return `${action} ${itemType}: ${formattedName}`
+      }
+
+      try {
+        await fs.access(normalizedDirectoryPath, constants.F_OK)
+      } catch (error) {
+        const code = String((error as NodeJS.ErrnoException)?.code || "")
+        if (code === "ENOENT") {
+          sendWatcherEvent("Selected path was deleted.")
+          stopUtilityWatcher(event.sender.id)
+          return
+        }
+      }
+
+      if (eventType === "rename") {
+        if (!targetPath) {
+          sendWatcherEvent(`Changed: ${displayName}`)
+          return
+        }
+
+        try {
+          const targetStat = await fs.stat(targetPath)
+          const itemType = targetStat.isDirectory() ? "directory" : "file"
+          if (relativePath) {
+            knownEntries.set(relativePath, itemType)
+          }
+          sendWatcherEvent(formatEventMessage("Created", itemType))
+        } catch (error) {
+          const code = String((error as NodeJS.ErrnoException)?.code || "")
+          if (code === "ENOENT") {
+            const previousType = relativePath ? knownEntries.get(relativePath) : undefined
+            if (relativePath) {
+              knownEntries.delete(relativePath)
+            }
+            sendWatcherEvent(formatEventMessage("Deleted", previousType))
+            return
+          }
+
+          sendWatcherEvent(formatEventMessage("Changed"))
+        }
+        return
+      }
+
+      let itemType: "file" | "directory" | undefined = relativePath ? knownEntries.get(relativePath) : undefined
+
+      if (!itemType && targetPath) {
+        try {
+          const targetStat = await fs.stat(targetPath)
+          itemType = targetStat.isDirectory() ? "directory" : "file"
+          if (relativePath) {
+            knownEntries.set(relativePath, itemType)
+          }
+        } catch {}
+      }
+
+      sendWatcherEvent(formatEventMessage("Modified", itemType))
+    })
+
+    watcher.on("error", (error) => {
+      const code = String((error as NodeJS.ErrnoException)?.code || "")
+      if (code === "ENOENT") {
+        sendWatcherEvent("Selected path was deleted.")
+      } else {
+        sendWatcherEvent(
+          error instanceof Error ? `Watcher error: ${error.message}` : "Watcher error."
+        )
+      }
+
+      stopUtilityWatcher(event.sender.id)
+    })
+
+    if (!event.sender.isDestroyed()) {
+      event.sender.once("destroyed", () => {
+        stopUtilityWatcher(event.sender.id)
+      })
+    }
+
+    utilityWatchers.set(event.sender.id, {
+      watcher,
+      path: normalizedDirectoryPath,
+      knownEntries
+    })
+
+    return {
+      success: true,
+      path: normalizedDirectoryPath
+    }
+  })
+
+  ipcMain.handle("utility:stop-file-watcher", async (event) => {
+    return stopUtilityWatcher(event.sender.id)
   })
 
   ipcMain.handle("utility:get-directory-item-count", async (_event, directoryPath: string) => {
@@ -2357,6 +2748,122 @@ function registerIpcHandlers() {
   })
 
   ipcMain.on("notepad:save-all-result", () => {
+  })
+
+  ipcMain.handle("todos:list", () => {
+    return {
+      items: todosStore.get("items"),
+      moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+    }
+  })
+
+  ipcMain.handle("todos:add", (_event, text: string) => {
+    const trimmedText = String(text || "").trim()
+    if (!trimmedText) {
+      return {
+        success: false,
+        items: todosStore.get("items")
+      }
+    }
+
+    const nextItems = applyTodoOrdering(
+      [
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          text: trimmedText,
+          completed: false,
+          createdAt: Date.now()
+        },
+        ...todosStore.get("items")
+      ],
+      todosStore.get("moveCompletedToBottom")
+    )
+
+    todosStore.set("items", nextItems)
+
+    return {
+      success: true,
+      items: nextItems,
+      moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+    }
+  })
+
+  ipcMain.handle("todos:toggle", (_event, id: string) => {
+    const nextItems = applyTodoOrdering(
+      todosStore.get("items").map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              completed: !item.completed
+            }
+          : item
+      ),
+      todosStore.get("moveCompletedToBottom")
+    )
+
+    todosStore.set("items", nextItems)
+
+    return {
+      success: true,
+      items: nextItems,
+      moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+    }
+  })
+
+  ipcMain.handle("todos:delete", (_event, id: string) => {
+    const nextItems = todosStore.get("items").filter((item) => item.id !== id)
+    todosStore.set("items", nextItems)
+
+    return {
+      success: true,
+      items: nextItems,
+      moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+    }
+  })
+
+  ipcMain.handle("todos:reorder", (_event, orderedIds: string[]) => {
+    const currentItems = todosStore.get("items")
+    const currentMap = new Map(currentItems.map((item) => [item.id, item]))
+    const nextItems = orderedIds
+      .map((id) => currentMap.get(id))
+      .filter((item): item is TodoItem => Boolean(item))
+
+    const remainingItems = currentItems.filter((item) => !orderedIds.includes(item.id))
+    const finalItems = applyTodoOrdering(
+      [...nextItems, ...remainingItems],
+      todosStore.get("moveCompletedToBottom")
+    )
+
+    todosStore.set("items", finalItems)
+
+    return {
+      success: true,
+      items: finalItems,
+      moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+    }
+  })
+
+  ipcMain.handle("todos:set-move-completed-to-bottom", (_event, value: boolean) => {
+    todosStore.set("moveCompletedToBottom", Boolean(value))
+    const nextItems = applyTodoOrdering(todosStore.get("items"), Boolean(value))
+    todosStore.set("items", nextItems)
+
+    return {
+      success: true,
+      items: nextItems,
+      moveCompletedToBottom: Boolean(value)
+    }
+  })
+
+  ipcMain.handle("todos:clear-completed", () => {
+    const nextItems = todosStore.get("items").filter((item) => !item.completed)
+    todosStore.set("items", nextItems)
+
+    return {
+      success: true,
+      items: nextItems,
+      moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+    }
   })
 }
 

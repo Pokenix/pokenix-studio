@@ -1,8 +1,8 @@
 import "./index.css"
-import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen } from "lucide-react"
+import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
-type Page = "home" | "plugins" | "themes" | "settings" | "console"
+type Page = "home" | "plugins" | "themes" | "hub" | "settings" | "console"
 
 type AppSettings = {
   startWithSystem: boolean
@@ -12,7 +12,7 @@ type AppSettings = {
   developerMode: boolean
 }
 
-type ModuleId = "notepad" | "utility-tools"
+type ModuleId = "notepad" | "todo-list" | "utility-tools"
 
 type ModuleItem = {
   id: ModuleId
@@ -36,6 +36,7 @@ type PluginManifest = {
   entry: string
   style?: string
   dependencies?: Record<string, string>
+  permissions?: string[]
   disabled?: boolean
   open?: boolean
 }
@@ -114,6 +115,19 @@ type MatchRange = {
   end: number
 }
 
+type RgbColor = {
+  r: number
+  g: number
+  b: number
+}
+
+type TodoItem = {
+  id: string
+  text: string
+  completed: boolean
+  createdAt: number
+}
+
 declare global {
   interface Window {
     require?: (id: string) => unknown
@@ -129,6 +143,17 @@ declare global {
       }
       modules: {
         open: (moduleId: ModuleId) => Promise<{ success: boolean }>
+      }
+      todos: {
+        list: () => Promise<{ items: TodoItem[]; moveCompletedToBottom: boolean }>
+        add: (text: string) => Promise<{ success: boolean; items: TodoItem[]; moveCompletedToBottom: boolean }>
+        toggle: (id: string) => Promise<{ success: boolean; items: TodoItem[]; moveCompletedToBottom: boolean }>
+        delete: (id: string) => Promise<{ success: boolean; items: TodoItem[]; moveCompletedToBottom: boolean }>
+        reorder: (orderedIds: string[]) => Promise<{ success: boolean; items: TodoItem[]; moveCompletedToBottom: boolean }>
+        setMoveCompletedToBottom: (
+          value: boolean
+        ) => Promise<{ success: boolean; items: TodoItem[]; moveCompletedToBottom: boolean }>
+        clearCompleted: () => Promise<{ success: boolean; items: TodoItem[]; moveCompletedToBottom: boolean }>
       }
       plugins: {
         status: () => Promise<PluginsStatusResponse>
@@ -155,14 +180,20 @@ declare global {
       app: {
         version: () => Promise<string>
         openWebsite: () => Promise<{ success: boolean }>
+        openExternalUrl: (url: string) => Promise<{ success: boolean }>
         onNavigate: (callback: (page: Page) => void) => () => void
       }
       windowState: {
         reset: () => Promise<{ success: boolean }>
       }
-      utility: {
+  utility: {
         chooseDirectory: () => Promise<{ success: boolean; path?: string }>
         openDirectory: (directoryPath: string) => Promise<{ success: boolean }>
+        startFileWatcher: (
+          directoryPath: string
+        ) => Promise<{ success: boolean; path?: string; error?: string }>
+        stopFileWatcher: () => Promise<{ success: boolean }>
+        onFileWatcherEvent: (callback: (payload: { message: string }) => void) => () => void
         getDirectoryItemCount: (
           directoryPath: string
         ) => Promise<{ success: boolean; count?: number; error?: string }>
@@ -239,6 +270,174 @@ function HomePage({ modules }: { modules: ModuleItem[] }) {
       </section>
     </>
   )
+}
+
+function clampColorChannel(value: number) {
+  return Math.min(255, Math.max(0, Math.round(value)))
+}
+
+function normalizeHexColor(value: string) {
+  const trimmed = value.trim().replace(/^#/, "")
+
+  if (!/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return null
+  }
+
+  if (trimmed.length === 3) {
+    return trimmed
+      .split("")
+      .map((character) => character + character)
+      .join("")
+      .toUpperCase()
+  }
+
+  return trimmed.toUpperCase()
+}
+
+function hexToRgb(value: string): RgbColor | null {
+  const normalizedHex = normalizeHexColor(value)
+  if (!normalizedHex) return null
+
+  return {
+    r: Number.parseInt(normalizedHex.slice(0, 2), 16),
+    g: Number.parseInt(normalizedHex.slice(2, 4), 16),
+    b: Number.parseInt(normalizedHex.slice(4, 6), 16)
+  }
+}
+
+function rgbToHex({ r, g, b }: RgbColor) {
+  return `#${[r, g, b]
+    .map((channel) => clampColorChannel(channel).toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase()}`
+}
+
+function parseRgbColor(value: string): RgbColor | null {
+  const cleaned = value.trim().replace(/^rgb\s*\(/i, "").replace(/\)$/i, "")
+  const parts = cleaned
+    .split(/[,\s/]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  if (parts.length !== 3) {
+    return null
+  }
+
+  const channels = parts.map((part) => Number(part))
+  if (channels.some((channel) => Number.isNaN(channel) || channel < 0 || channel > 255)) {
+    return null
+  }
+
+  return {
+    r: clampColorChannel(channels[0]),
+    g: clampColorChannel(channels[1]),
+    b: clampColorChannel(channels[2])
+  }
+}
+
+function rgbToHsl({ r, g, b }: RgbColor) {
+  const red = r / 255
+  const green = g / 255
+  const blue = b / 255
+  const max = Math.max(red, green, blue)
+  const min = Math.min(red, green, blue)
+  const delta = max - min
+  const lightness = (max + min) / 2
+
+  let hue = 0
+  let saturation = 0
+
+  if (delta !== 0) {
+    saturation = delta / (1 - Math.abs(2 * lightness - 1))
+
+    switch (max) {
+      case red:
+        hue = ((green - blue) / delta) % 6
+        break
+      case green:
+        hue = (blue - red) / delta + 2
+        break
+      default:
+        hue = (red - green) / delta + 4
+        break
+    }
+
+    hue *= 60
+    if (hue < 0) hue += 360
+  }
+
+  return {
+    h: Math.round(hue),
+    s: Math.round(saturation * 100),
+    l: Math.round(lightness * 100)
+  }
+}
+
+function parseHslColor(value: string): RgbColor | null {
+  const cleaned = value
+    .trim()
+    .replace(/^hsl\s*\(/i, "")
+    .replace(/\)$/i, "")
+    .replace(/%/g, "")
+  const parts = cleaned
+    .split(/[,\s/]+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  if (parts.length !== 3) {
+    return null
+  }
+
+  const [rawHue, rawSaturation, rawLightness] = parts.map((part) => Number(part))
+
+  if (
+    [rawHue, rawSaturation, rawLightness].some((part) => Number.isNaN(part)) ||
+    rawSaturation < 0 ||
+    rawSaturation > 100 ||
+    rawLightness < 0 ||
+    rawLightness > 100
+  ) {
+    return null
+  }
+
+  const hue = ((rawHue % 360) + 360) % 360
+  const saturation = rawSaturation / 100
+  const lightness = rawLightness / 100
+  const chroma = (1 - Math.abs(2 * lightness - 1)) * saturation
+  const hueSegment = hue / 60
+  const x = chroma * (1 - Math.abs((hueSegment % 2) - 1))
+
+  let redPrime = 0
+  let greenPrime = 0
+  let bluePrime = 0
+
+  if (hueSegment >= 0 && hueSegment < 1) {
+    redPrime = chroma
+    greenPrime = x
+  } else if (hueSegment < 2) {
+    redPrime = x
+    greenPrime = chroma
+  } else if (hueSegment < 3) {
+    greenPrime = chroma
+    bluePrime = x
+  } else if (hueSegment < 4) {
+    greenPrime = x
+    bluePrime = chroma
+  } else if (hueSegment < 5) {
+    redPrime = x
+    bluePrime = chroma
+  } else {
+    redPrime = chroma
+    bluePrime = x
+  }
+
+  const match = lightness - chroma / 2
+
+  return {
+    r: clampColorChannel((redPrime + match) * 255),
+    g: clampColorChannel((greenPrime + match) * 255),
+    b: clampColorChannel((bluePrime + match) * 255)
+  }
 }
 
 function SettingsPage({
@@ -606,11 +805,220 @@ function ThemesPage() {
   )
 }
 
+function HubPage() {
+  return (
+    <div className="settings-page">
+      <h1>Pokenix Hub</h1>
+      <p className="page-subtitle">Coming soon...</p>
+    </div>
+  )
+}
+
+function TodoListPage() {
+  const [items, setItems] = useState<TodoItem[]>([])
+  const [draft, setDraft] = useState("")
+  const [draggedTodoId, setDraggedTodoId] = useState<string | null>(null)
+  const [moveCompletedToBottom, setMoveCompletedToBottom] = useState(true)
+
+  useEffect(() => {
+    const loadTodos = async () => {
+      const result = await window.hubAPI.todos.list()
+      setItems(result.items)
+      setMoveCompletedToBottom(result.moveCompletedToBottom)
+    }
+
+    void loadTodos()
+  }, [])
+
+  const addTodo = async () => {
+    const result = await window.hubAPI.todos.add(draft)
+    if (!result.success) return
+    setItems(result.items)
+    setMoveCompletedToBottom(result.moveCompletedToBottom)
+    setDraft("")
+  }
+
+  const reorderTodos = async (fromId: string, toId: string) => {
+    if (fromId === toId) return
+
+    const currentIndex = items.findIndex((item) => item.id === fromId)
+    const targetIndex = items.findIndex((item) => item.id === toId)
+    if (currentIndex === -1 || targetIndex === -1) return
+
+    const nextItems = [...items]
+    const [movedItem] = nextItems.splice(currentIndex, 1)
+    nextItems.splice(targetIndex, 0, movedItem)
+
+    setItems(nextItems)
+
+    const result = await window.hubAPI.todos.reorder(nextItems.map((item) => item.id))
+    if (result.success) {
+      setItems(result.items)
+      setMoveCompletedToBottom(result.moveCompletedToBottom)
+    }
+  }
+
+  const activeCount = items.filter((item) => !item.completed).length
+  const completedCount = items.length - activeCount
+  const linkPattern = /(https?:\/\/[^\s]+)/g
+
+  const renderTodoText = (text: string, completed: boolean) => {
+    const parts = text.split(linkPattern)
+
+    return parts.map((part, index) => {
+      if (!/^https?:\/\//i.test(part)) {
+        return <span key={`${part}-${index}`}>{part}</span>
+      }
+
+      return (
+        <a
+          key={`${part}-${index}`}
+          className={completed ? "todo-item-link todo-item-link-completed" : "todo-item-link"}
+          href={part}
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            void window.hubAPI.app.openExternalUrl(part)
+          }}
+        >
+          {part}
+        </a>
+      )
+    })
+  }
+
+  return (
+    <div className="module-page">
+      <h1>To-Do List</h1>
+      <p>Track quick tasks and keep them between app launches.</p>
+
+      <div className="settings-group" style={{ marginTop: 24, maxWidth: 880 }}>
+        <h3>Add task</h3>
+        <div className="todo-input-row">
+          <input
+            className="utility-input"
+            type="text"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return
+              event.preventDefault()
+              void addTodo()
+            }}
+            placeholder="Write a task..."
+          />
+          <button
+            className="notepad-action-btn"
+            onClick={() => {
+              void addTodo()
+            }}
+            disabled={!draft.trim()}
+            type="button"
+          >
+            Add
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-group" style={{ maxWidth: 880 }}>
+        <h3>Tasks</h3>
+        <p style={{ marginBottom: 14 }}>
+          {activeCount} active, {completedCount} completed
+        </p>
+        <label className="settings-item todo-settings-item">
+          <span>Move completed tasks to bottom</span>
+          <input
+            type="checkbox"
+            checked={moveCompletedToBottom}
+            onChange={(event) => {
+              void window.hubAPI.todos.setMoveCompletedToBottom(event.target.checked).then((result) => {
+                setItems(result.items)
+                setMoveCompletedToBottom(result.moveCompletedToBottom)
+              })
+            }}
+          />
+        </label>
+
+        {items.length === 0 ? (
+          <p>No tasks yet.</p>
+        ) : (
+          <div className="todo-list">
+            {items.map((item) => (
+              <div
+                key={item.id}
+                className={`todo-item ${draggedTodoId === item.id ? "todo-item-dragging" : ""}`}
+                draggable
+                onDragStart={() => setDraggedTodoId(item.id)}
+                onDragEnd={() => setDraggedTodoId(null)}
+                onDragOver={(event) => {
+                  event.preventDefault()
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  if (!draggedTodoId) return
+                  void reorderTodos(draggedTodoId, item.id)
+                  setDraggedTodoId(null)
+                }}
+              >
+                <div className="todo-item-main">
+                  <input
+                    type="checkbox"
+                    checked={item.completed}
+                    onChange={() => {
+                      void window.hubAPI.todos.toggle(item.id).then((result) => {
+                        setItems(result.items)
+                        setMoveCompletedToBottom(result.moveCompletedToBottom)
+                      })
+                    }}
+                  />
+                  <span className={item.completed ? "todo-item-text todo-item-text-completed" : "todo-item-text"}>
+                    {renderTodoText(item.text, item.completed)}
+                  </span>
+                </div>
+
+                <button
+                  className="notepad-clear-btn"
+                  onClick={() => {
+                    void window.hubAPI.todos.delete(item.id).then((result) => {
+                      setItems(result.items)
+                      setMoveCompletedToBottom(result.moveCompletedToBottom)
+                    })
+                  }}
+                  type="button"
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="settings-action-row">
+          <button
+            className="notepad-action-btn"
+            onClick={() => {
+              void window.hubAPI.todos.clearCompleted().then((result) => {
+                setItems(result.items)
+                setMoveCompletedToBottom(result.moveCompletedToBottom)
+              })
+            }}
+            disabled={completedCount === 0}
+            type="button"
+          >
+            Clear Completed
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function UtilityToolsPage() {
-  const [activeTool, setActiveTool] = useState<"home" | "file-manager">("home")
+  const [activeTool, setActiveTool] = useState<"home" | "file-manager" | "color-tools">("home")
   const [activeFileManagerTool, setActiveFileManagerTool] = useState<
-    "home" | "create-files" | "move-files" | "directory-structure"
+    "home" | "create-files" | "move-files" | "directory-structure" | "file-watcher"
   >("home")
+  const [activeColorTool, setActiveColorTool] = useState<"home" | "converter">("home")
 
   const [directoriesBasePath, setDirectoriesBasePath] = useState("")
   const [directoryName, setDirectoryName] = useState("")
@@ -627,6 +1035,121 @@ function UtilityToolsPage() {
   const [treeMessage, setTreeMessage] = useState("")
   const [hideEmptyFolders, setHideEmptyFolders] = useState(false)
   const [hideHiddenFiles, setHideHiddenFiles] = useState(false)
+  const [watcherPath, setWatcherPath] = useState("")
+  const [watcherMessage, setWatcherMessage] = useState("")
+  const [watcherLogs, setWatcherLogs] = useState<string[]>([])
+  const [hexValue, setHexValue] = useState("#3ABEFF")
+  const [rgbR, setRgbR] = useState("58")
+  const [rgbG, setRgbG] = useState("190")
+  const [rgbB, setRgbB] = useState("255")
+  const [hslH, setHslH] = useState("199")
+  const [hslS, setHslS] = useState("100")
+  const [hslL, setHslL] = useState("61")
+  const [colorMessage, setColorMessage] = useState("")
+  const colorPickerRef = useRef<HTMLInputElement | null>(null)
+
+  const colorPreview = useMemo(() => {
+    const hexRgb = hexToRgb(hexValue)
+    if (hexRgb) {
+      return {
+        rgb: hexRgb,
+        source: "hex" as const
+      }
+    }
+
+    const parsedRgb = parseRgbColor(`${rgbR}, ${rgbG}, ${rgbB}`)
+    if (parsedRgb) {
+      return {
+        rgb: parsedRgb,
+        source: "rgb" as const
+      }
+    }
+
+    const parsedHsl = parseHslColor(`${hslH}, ${hslS}%, ${hslL}%`)
+    if (parsedHsl) {
+      return {
+        rgb: parsedHsl,
+        source: "hsl" as const
+      }
+    }
+
+    return null
+  }, [hexValue, rgbR, rgbG, rgbB, hslH, hslS, hslL])
+
+  const syncHexValue = (nextValue: string) => {
+    setHexValue(nextValue)
+    const rgb = hexToRgb(nextValue)
+    if (!rgb) {
+      setColorMessage("Enter a valid HEX value like #3ABEFF or #0af.")
+      return
+    }
+
+    const hsl = rgbToHsl(rgb)
+    setHexValue(rgbToHex(rgb))
+    setRgbR(String(rgb.r))
+    setRgbG(String(rgb.g))
+    setRgbB(String(rgb.b))
+    setHslH(String(hsl.h))
+    setHslS(String(hsl.s))
+    setHslL(String(hsl.l))
+    setColorMessage("")
+  }
+
+  const syncRgbValue = (channel: "r" | "g" | "b", nextValue: string) => {
+    if (channel === "r") setRgbR(nextValue)
+    if (channel === "g") setRgbG(nextValue)
+    if (channel === "b") setRgbB(nextValue)
+
+    const nextRgbValue = {
+      r: channel === "r" ? nextValue : rgbR,
+      g: channel === "g" ? nextValue : rgbG,
+      b: channel === "b" ? nextValue : rgbB
+    }
+
+    const rgb = parseRgbColor(`${nextRgbValue.r}, ${nextRgbValue.g}, ${nextRgbValue.b}`)
+    if (!rgb) {
+      setColorMessage("Enter RGB as three values between 0 and 255.")
+      return
+    }
+
+    const hsl = rgbToHsl(rgb)
+    setHexValue(rgbToHex(rgb))
+    setRgbR(String(rgb.r))
+    setRgbG(String(rgb.g))
+    setRgbB(String(rgb.b))
+    setHslH(String(hsl.h))
+    setHslS(String(hsl.s))
+    setHslL(String(hsl.l))
+    setColorMessage("")
+  }
+
+  const syncHslValue = (channel: "h" | "s" | "l", nextValue: string) => {
+    if (channel === "h") setHslH(nextValue)
+    if (channel === "s") setHslS(nextValue)
+    if (channel === "l") setHslL(nextValue)
+
+    const nextHslValue = {
+      h: channel === "h" ? nextValue : hslH,
+      s: channel === "s" ? nextValue : hslS,
+      l: channel === "l" ? nextValue : hslL
+    }
+
+    const rgb = parseHslColor(`${nextHslValue.h}, ${nextHslValue.s}%, ${nextHslValue.l}%`)
+    if (!rgb) {
+      setColorMessage("Enter HSL as hue, saturation%, lightness%.")
+      return
+    }
+
+    const hsl = rgbToHsl(rgb)
+    setHexValue(rgbToHex(rgb))
+    setRgbR(String(rgb.r))
+    setRgbG(String(rgb.g))
+    setRgbB(String(rgb.b))
+    setHslH(String(hsl.h))
+    setHslS(String(hsl.s))
+    setHslL(String(hsl.l))
+    setColorMessage("")
+  }
 
   const tryAddDirectory = async () => {
     const trimmedName = directoryName.trim()
@@ -800,6 +1323,33 @@ function UtilityToolsPage() {
     if (!treePath) return
     void refreshDirectoryTree(treePath)
   }, [treePath, hideEmptyFolders, hideHiddenFiles])
+
+  useEffect(() => {
+    if (!(activeTool === "file-manager" && activeFileManagerTool === "file-watcher")) {
+      void window.hubAPI.utility.stopFileWatcher()
+      return
+    }
+
+    const unsubscribe = window.hubAPI.utility.onFileWatcherEvent(({ message }) => {
+      const timestamp = new Date().toLocaleTimeString("tr-TR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      })
+
+      setWatcherLogs((current) => [`[${timestamp}] ${message}`, ...current])
+
+      if (message === "Selected path was deleted.") {
+        setWatcherMessage(message)
+        setWatcherPath("")
+      }
+    })
+
+    return () => {
+      unsubscribe()
+      void window.hubAPI.utility.stopFileWatcher()
+    }
+  }, [activeTool, activeFileManagerTool])
 
   if (activeTool === "file-manager" && activeFileManagerTool === "create-files") {
     return (
@@ -1189,6 +1739,65 @@ function UtilityToolsPage() {
     )
   }
 
+  if (activeTool === "file-manager" && activeFileManagerTool === "file-watcher") {
+    return (
+      <div className="settings-page utility-page">
+        <button className="utility-back-btn" onClick={() => setActiveFileManagerTool("home")} type="button">
+          <ArrowLeft size={16} />
+          <span>Back</span>
+        </button>
+
+        <h1>File Watcher</h1>
+        <p className="page-subtitle">Watch a folder and log live changes.</p>
+
+        <div className="settings-group">
+          <h3>Choose path</h3>
+          <p style={{ marginBottom: 14, wordBreak: "break-all" }}>
+            {watcherPath || "No path selected yet."}
+          </p>
+          <div className="settings-action-row" style={{ marginTop: 0 }}>
+            <button
+              className="notepad-action-btn"
+              onClick={async () => {
+                const result = await window.hubAPI.utility.chooseDirectory()
+                if (!result.success || !result.path) return
+
+                const watchResult = await window.hubAPI.utility.startFileWatcher(result.path)
+                if (!watchResult.success) {
+                  setWatcherMessage(watchResult.error || "Could not start watching that path.")
+                  return
+                }
+
+                setWatcherPath(result.path)
+                setWatcherLogs([])
+                setWatcherMessage("Watching for changes...")
+              }}
+              type="button"
+            >
+              Choose Path
+            </button>
+          </div>
+          {watcherMessage && (
+            <p
+              className={`utility-message ${
+                watcherMessage.includes("Watching") ? "" : "utility-message-error"
+              }`}
+            >
+              {watcherMessage}
+            </p>
+          )}
+        </div>
+
+        <div className="settings-group">
+          <h3>Log</h3>
+          <pre className="utility-code-block">
+            {watcherLogs.length > 0 ? watcherLogs.join("\n") : "No file events yet."}
+          </pre>
+        </div>
+      </div>
+    )
+  }
+
   if (activeTool === "file-manager") {
     return (
       <div className="settings-page utility-page">
@@ -1237,6 +1846,171 @@ function UtilityToolsPage() {
               <p>Generate an ASCII tree for a selected folder.</p>
             </div>
           </button>
+
+          <button className="module-card" onClick={() => setActiveFileManagerTool("file-watcher")} type="button">
+            <div className="module-icon">
+              <FolderKanban size={22} />
+            </div>
+            <div className="module-info">
+              <h3>File Watcher</h3>
+              <p>Watch a folder and log changes in real time.</p>
+            </div>
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (activeTool === "color-tools") {
+    if (activeColorTool === "converter") {
+      const previewRgb = colorPreview?.rgb ?? { r: 58, g: 190, b: 255 }
+      const previewHsl = rgbToHsl(previewRgb)
+
+      return (
+        <div className="settings-page utility-page">
+          <button
+            className="utility-back-btn"
+            onClick={() => {
+              setActiveColorTool("home")
+            }}
+            type="button"
+          >
+            <ArrowLeft size={16} />
+            <span>Back</span>
+          </button>
+
+          <h1>HEX / RGB / HSL Converter</h1>
+          <p className="page-subtitle">Convert between the most common color formats instantly.</p>
+
+          <div className="settings-group">
+            <h3>Color preview</h3>
+            <div className="color-preview-row">
+              <div
+                className="color-preview-swatch"
+                style={{ background: `rgb(${previewRgb.r}, ${previewRgb.g}, ${previewRgb.b})` }}
+                onClick={() => colorPickerRef.current?.click()}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault()
+                    colorPickerRef.current?.click()
+                  }
+                }}
+              />
+              <div className="color-preview-meta">
+                <strong>{rgbToHex(previewRgb)}</strong>
+                <p>rgb({previewRgb.r}, {previewRgb.g}, {previewRgb.b})</p>
+                <p>hsl({previewHsl.h}, {previewHsl.s}%, {previewHsl.l}%)</p>
+              </div>
+            </div>
+            <input
+              ref={colorPickerRef}
+              className="color-picker-hidden-input"
+              type="color"
+              value={rgbToHex(previewRgb)}
+              onChange={(event) => syncHexValue(event.target.value)}
+              aria-label="Color Picker"
+            />
+          </div>
+
+          <div className="settings-group">
+            <h3>HEX</h3>
+            <input
+              className="utility-input"
+              type="text"
+              value={hexValue}
+              onChange={(event) => syncHexValue(event.target.value)}
+              placeholder="#3ABEFF"
+            />
+          </div>
+
+          <div className="settings-group">
+            <h3>RGB</h3>
+            <div className="utility-split-inputs">
+              <input
+                className="utility-input"
+                type="text"
+                value={rgbR}
+                onChange={(event) => syncRgbValue("r", event.target.value)}
+                placeholder="R"
+              />
+              <input
+                className="utility-input"
+                type="text"
+                value={rgbG}
+                onChange={(event) => syncRgbValue("g", event.target.value)}
+                placeholder="G"
+              />
+              <input
+                className="utility-input"
+                type="text"
+                value={rgbB}
+                onChange={(event) => syncRgbValue("b", event.target.value)}
+                placeholder="B"
+              />
+            </div>
+          </div>
+
+          <div className="settings-group">
+            <h3>HSL</h3>
+            <div className="utility-split-inputs">
+              <input
+                className="utility-input"
+                type="text"
+                value={hslH}
+                onChange={(event) => syncHslValue("h", event.target.value)}
+                placeholder="H"
+              />
+              <input
+                className="utility-input"
+                type="text"
+                value={hslS}
+                onChange={(event) => syncHslValue("s", event.target.value)}
+                placeholder="S%"
+              />
+              <input
+                className="utility-input"
+                type="text"
+                value={hslL}
+                onChange={(event) => syncHslValue("l", event.target.value)}
+                placeholder="L%"
+              />
+            </div>
+            {colorMessage && (
+              <p className="utility-message utility-message-error">{colorMessage}</p>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div className="settings-page utility-page">
+        <button
+          className="utility-back-btn"
+          onClick={() => {
+            setActiveTool("home")
+          }}
+          type="button"
+        >
+          <ArrowLeft size={16} />
+          <span>Back</span>
+        </button>
+
+        <h1>Color Tools</h1>
+        <p className="page-subtitle">Color helpers and converters in one place.</p>
+
+        <div className="module-grid">
+          <button className="module-card" onClick={() => setActiveColorTool("converter")} type="button">
+            <div className="module-icon">
+              <Palette size={22} />
+            </div>
+            <div className="module-info">
+              <h3>HEX / RGB / HSL Converter</h3>
+              <p>Convert colors instantly and preview the result live.</p>
+            </div>
+          </button>
         </div>
       </div>
     )
@@ -1255,6 +2029,16 @@ function UtilityToolsPage() {
           <div className="module-info">
             <h3>File Manager</h3>
             <p>Browse and manage files from a dedicated utility page.</p>
+          </div>
+        </button>
+
+        <button className="module-card" onClick={() => setActiveTool("color-tools")} type="button">
+          <div className="module-icon">
+            <Palette size={22} />
+          </div>
+          <div className="module-info">
+            <h3>Color Tools</h3>
+            <p>Color conversion and palette helpers in one place.</p>
           </div>
         </button>
       </div>
@@ -2625,6 +3409,10 @@ function ModulePage() {
     return <NotepadPage />
   }
 
+  if (moduleId === "todo-list") {
+    return <TodoListPage />
+  }
+
   if (moduleId === "utility-tools") {
     return <UtilityToolsPage />
   }
@@ -2672,6 +3460,12 @@ export default function App() {
       title: "Notepad",
       description: "Quick notes and text files",
       icon: <NotebookPen size={22} />
+    },
+    {
+      id: "todo-list",
+      title: "To-Do List",
+      description: "Track tasks and keep a simple checklist",
+      icon: <ListTodo size={22} />
     },
     {
       id: "utility-tools",
@@ -2873,6 +3667,14 @@ export default function App() {
           </button>
 
           <button
+            className={`nav-item ${page === "hub" ? "active" : ""}`}
+            onClick={() => setPage("hub")}
+          >
+            <Blocks size={18} />
+            <span>Pokenix Hub</span>
+          </button>
+
+          <button
             className={`nav-item ${page === "settings" ? "active" : ""}`}
             onClick={() => setPage("settings")}
           >
@@ -2918,6 +3720,7 @@ export default function App() {
           />
         )}
         {page === "themes" && <ThemesPage />}
+        {page === "hub" && <HubPage />}
         {page === "settings" && (
           <SettingsPage
             settings={settings}

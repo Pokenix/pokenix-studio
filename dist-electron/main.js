@@ -16,9 +16,48 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 const moduleWindows = new Map();
+const utilityWatchers = new Map();
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 const forceCloseWindowIds = new Set();
 const notepadDirtyState = new Map();
+const PLUGIN_PERMISSION_RULES = {
+    ui: {
+        safe: true,
+        description: "Show interface elements inside the plugin window."
+    },
+    storage: {
+        safe: true,
+        description: "Read and save the plugin's own local data."
+    },
+    clipboard: {
+        safe: true,
+        description: "Copy data to and read data from the clipboard."
+    },
+    notifications: {
+        safe: true,
+        description: "Show in-app notifications."
+    },
+    filesystem: {
+        safe: false,
+        description: "Read, write, create, move, or delete files and folders on this computer."
+    },
+    network: {
+        safe: false,
+        description: "Send or receive data over the internet or a local network."
+    },
+    process: {
+        safe: false,
+        description: "Start or control system processes."
+    },
+    native_modules: {
+        safe: false,
+        description: "Load advanced or native modules with deeper system access."
+    },
+    external_links: {
+        safe: false,
+        description: "Open links or other content outside Pokenix Studio."
+    }
+};
 const defaultSettings = {
     startWithSystem: false,
     closeToTray: true,
@@ -28,6 +67,7 @@ const defaultSettings = {
 };
 let settingsStore;
 let notesStore;
+let todosStore;
 let windowStateStore;
 let pluginStore;
 async function initStores() {
@@ -43,11 +83,19 @@ async function initStores() {
             notepadFilePath: ""
         }
     });
+    todosStore = new Store({
+        name: "todos",
+        defaults: {
+            items: [],
+            moveCompletedToBottom: true
+        }
+    });
     pluginStore = new Store({
         name: "plugins",
         defaults: {
             pluginsEnabled: false,
-            disabledPluginIds: []
+            disabledPluginIds: [],
+            approvedUnsafePermissions: {}
         }
     });
     windowStateStore = new Store({
@@ -355,9 +403,48 @@ function closePluginWindow(pluginId) {
     notifyPluginStateChanged();
     return { success: true };
 }
+function normalizePluginPermissions(permissions) {
+    if (!Array.isArray(permissions))
+        return [];
+    return permissions
+        .filter((permission) => typeof permission === "string")
+        .map((permission) => permission.trim())
+        .filter(Boolean);
+}
+function getUnsafePluginPermissions(plugin) {
+    return normalizePluginPermissions(plugin.permissions).filter((permission) => !PLUGIN_PERMISSION_RULES[permission]?.safe);
+}
+function formatUnsafePermissionDetails(permissions) {
+    return permissions
+        .map((permission) => {
+        const rule = PLUGIN_PERMISSION_RULES[permission];
+        if (!rule) {
+            return `- ${permission}: Unknown permission. Treated as unsafe by default.`;
+        }
+        return `- ${permission}: ${rule.description}`;
+    })
+        .join("\n");
+}
+function getApprovedUnsafePermissions(pluginId) {
+    const approvals = pluginStore.get("approvedUnsafePermissions") || {};
+    return Array.isArray(approvals[pluginId]) ? approvals[pluginId] : [];
+}
+function setApprovedUnsafePermissions(pluginId, permissions) {
+    const approvals = pluginStore.get("approvedUnsafePermissions") || {};
+    pluginStore.set("approvedUnsafePermissions", {
+        ...approvals,
+        [pluginId]: permissions
+    });
+}
+function clearApprovedUnsafePermissions(pluginId) {
+    const approvals = { ...(pluginStore.get("approvedUnsafePermissions") || {}) };
+    delete approvals[pluginId];
+    pluginStore.set("approvedUnsafePermissions", approvals);
+}
 function disablePluginsGlobally() {
     pluginStore.set("pluginsEnabled", false);
     pluginStore.set("disabledPluginIds", []);
+    pluginStore.set("approvedUnsafePermissions", {});
     for (const [windowKey, win] of moduleWindows.entries()) {
         if (!windowKey.startsWith("plugin:"))
             continue;
@@ -437,7 +524,8 @@ async function readPluginRecord(pluginDirectory) {
                 description: manifest.description,
                 entry: manifest.entry,
                 style: manifest.style,
-                dependencies: manifest.dependencies
+                dependencies: manifest.dependencies,
+                permissions: normalizePluginPermissions(manifest.permissions)
             }
         };
     }
@@ -528,6 +616,7 @@ async function deletePlugin(pluginId) {
         await promises_1.default.rm(pluginRecord.directory, { recursive: true, force: true });
         await promises_1.default.rm(getPluginRuntimeDirectory(pluginId), { recursive: true, force: true });
         setPluginDisabled(pluginId, false);
+        clearApprovedUnsafePermissions(pluginId);
         const windowKey = `plugin:${pluginId}`;
         const win = moduleWindows.get(windowKey);
         if (win && !win.isDestroyed()) {
@@ -1186,6 +1275,32 @@ async function createPluginWindow(pluginId) {
     const pluginData = await getPluginById(pluginId);
     if (!pluginData)
         return false;
+    const unsafePermissions = getUnsafePluginPermissions(pluginData.plugin);
+    if (unsafePermissions.length > 0) {
+        const approvedPermissions = getApprovedUnsafePermissions(pluginData.plugin.id);
+        const missingApprovals = unsafePermissions.filter((permission) => !approvedPermissions.includes(permission));
+        if (missingApprovals.length > 0) {
+            const result = await electron_1.dialog.showMessageBox({
+                type: "warning",
+                buttons: ["Allow", "Disable Plugin", "Cancel"],
+                defaultId: 2,
+                cancelId: 2,
+                title: "Unsafe plugin permissions",
+                message: `${pluginData.plugin.name} requests unsafe permissions.`,
+                detail: `This plugin wants access to:\n${formatUnsafePermissionDetails(missingApprovals)}\n\nOnly allow this if you trust the plugin author.`
+            });
+            if (result.response === 1) {
+                setPluginDisabled(pluginData.plugin.id, true);
+                return false;
+            }
+            if (result.response !== 0) {
+                return false;
+            }
+            setApprovedUnsafePermissions(pluginData.plugin.id, [
+                ...new Set([...approvedPermissions, ...missingApprovals])
+            ]);
+        }
+    }
     try {
         const dependencyState = await ensurePluginDependencies(pluginData.plugin);
         if (!dependencyState.success) {
@@ -1289,12 +1404,53 @@ function createTray() {
     tray.on("click", showTrayMenu);
     tray.on("right-click", showTrayMenu);
 }
+function stopUtilityWatcher(webContentsId) {
+    const current = utilityWatchers.get(webContentsId);
+    if (!current) {
+        return { success: true };
+    }
+    current.watcher.close();
+    utilityWatchers.delete(webContentsId);
+    return { success: true };
+}
+async function collectDirectoryEntries(rootPath, currentPath, knownEntries) {
+    const entries = await promises_1.default.readdir(currentPath, { withFileTypes: true });
+    for (const entry of entries) {
+        const absolutePath = node_path_1.default.join(currentPath, entry.name);
+        const relativePath = node_path_1.default.relative(rootPath, absolutePath);
+        if (!relativePath) {
+            continue;
+        }
+        if (entry.isDirectory()) {
+            knownEntries.set(relativePath, "directory");
+            await collectDirectoryEntries(rootPath, absolutePath, knownEntries);
+            continue;
+        }
+        knownEntries.set(relativePath, "file");
+    }
+}
+function applyTodoOrdering(items, moveCompletedToBottom) {
+    if (!moveCompletedToBottom) {
+        return items;
+    }
+    const activeItems = items.filter((item) => !item.completed);
+    const completedItems = items.filter((item) => item.completed);
+    return [...activeItems, ...completedItems];
+}
 function registerIpcHandlers() {
     electron_1.ipcMain.handle("app:version", () => {
         return electron_1.app.getVersion();
     });
     electron_1.ipcMain.handle("app:open-website", async () => {
         await electron_1.shell.openExternal("https://www.pokenix.com/studio");
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("app:open-external-url", async (_event, url) => {
+        const normalizedUrl = String(url || "").trim();
+        if (!/^https?:\/\//i.test(normalizedUrl)) {
+            return { success: false };
+        }
+        await electron_1.shell.openExternal(normalizedUrl);
         return { success: true };
     });
     electron_1.ipcMain.handle("plugins:status", async () => {
@@ -1445,6 +1601,7 @@ function registerIpcHandlers() {
     electron_1.ipcMain.handle("module:open", (_event, moduleId) => {
         const moduleMap = {
             notepad: "Notepad",
+            "todo-list": "To-Do List",
             "utility-tools": "Utility Tools"
         };
         const title = moduleMap[moduleId];
@@ -1509,6 +1666,153 @@ function registerIpcHandlers() {
         }
         await electron_1.shell.openPath(normalizedDirectoryPath);
         return { success: true };
+    });
+    electron_1.ipcMain.handle("utility:start-file-watcher", async (event, directoryPath) => {
+        const normalizedDirectoryPath = String(directoryPath || "").trim();
+        if (!normalizedDirectoryPath) {
+            return {
+                success: false,
+                error: "Choose a path first."
+            };
+        }
+        try {
+            const stat = await promises_1.default.stat(normalizedDirectoryPath);
+            if (!stat.isDirectory()) {
+                return {
+                    success: false,
+                    error: "The selected path is not a directory."
+                };
+            }
+            await promises_1.default.access(normalizedDirectoryPath, node_fs_1.constants.R_OK);
+        }
+        catch (error) {
+            const code = String(error?.code || "");
+            if (code === "ENOENT") {
+                return {
+                    success: false,
+                    error: "The selected path does not exist anymore."
+                };
+            }
+            if (code === "EACCES" || code === "EPERM") {
+                return {
+                    success: false,
+                    error: "Pokenix Studio does not have permission to read that path."
+                };
+            }
+            return {
+                success: false,
+                error: "Could not watch the selected path."
+            };
+        }
+        stopUtilityWatcher(event.sender.id);
+        const sendWatcherEvent = (message) => {
+            if (event.sender.isDestroyed())
+                return;
+            event.sender.send("utility:file-watcher-event", {
+                message
+            });
+        };
+        const knownEntries = new Map();
+        try {
+            await collectDirectoryEntries(normalizedDirectoryPath, normalizedDirectoryPath, knownEntries);
+        }
+        catch {
+            return {
+                success: false,
+                error: "Could not read the selected path."
+            };
+        }
+        const watcher = (0, node_fs_1.watch)(normalizedDirectoryPath, { recursive: true }, async (eventType, fileName) => {
+            const displayName = typeof fileName === "string" && fileName.trim() ? fileName : "(unknown item)";
+            const relativePath = typeof fileName === "string" && fileName.trim() ? node_path_1.default.normalize(fileName) : null;
+            const targetPath = typeof fileName === "string" && fileName.trim()
+                ? node_path_1.default.join(normalizedDirectoryPath, fileName)
+                : null;
+            const formatEventMessage = (action, itemType) => {
+                const formattedName = itemType === "directory" ? `${displayName}/` : displayName;
+                if (!itemType) {
+                    return `${action}: ${formattedName}`;
+                }
+                return `${action} ${itemType}: ${formattedName}`;
+            };
+            try {
+                await promises_1.default.access(normalizedDirectoryPath, node_fs_1.constants.F_OK);
+            }
+            catch (error) {
+                const code = String(error?.code || "");
+                if (code === "ENOENT") {
+                    sendWatcherEvent("Selected path was deleted.");
+                    stopUtilityWatcher(event.sender.id);
+                    return;
+                }
+            }
+            if (eventType === "rename") {
+                if (!targetPath) {
+                    sendWatcherEvent(`Changed: ${displayName}`);
+                    return;
+                }
+                try {
+                    const targetStat = await promises_1.default.stat(targetPath);
+                    const itemType = targetStat.isDirectory() ? "directory" : "file";
+                    if (relativePath) {
+                        knownEntries.set(relativePath, itemType);
+                    }
+                    sendWatcherEvent(formatEventMessage("Created", itemType));
+                }
+                catch (error) {
+                    const code = String(error?.code || "");
+                    if (code === "ENOENT") {
+                        const previousType = relativePath ? knownEntries.get(relativePath) : undefined;
+                        if (relativePath) {
+                            knownEntries.delete(relativePath);
+                        }
+                        sendWatcherEvent(formatEventMessage("Deleted", previousType));
+                        return;
+                    }
+                    sendWatcherEvent(formatEventMessage("Changed"));
+                }
+                return;
+            }
+            let itemType = relativePath ? knownEntries.get(relativePath) : undefined;
+            if (!itemType && targetPath) {
+                try {
+                    const targetStat = await promises_1.default.stat(targetPath);
+                    itemType = targetStat.isDirectory() ? "directory" : "file";
+                    if (relativePath) {
+                        knownEntries.set(relativePath, itemType);
+                    }
+                }
+                catch { }
+            }
+            sendWatcherEvent(formatEventMessage("Modified", itemType));
+        });
+        watcher.on("error", (error) => {
+            const code = String(error?.code || "");
+            if (code === "ENOENT") {
+                sendWatcherEvent("Selected path was deleted.");
+            }
+            else {
+                sendWatcherEvent(error instanceof Error ? `Watcher error: ${error.message}` : "Watcher error.");
+            }
+            stopUtilityWatcher(event.sender.id);
+        });
+        if (!event.sender.isDestroyed()) {
+            event.sender.once("destroyed", () => {
+                stopUtilityWatcher(event.sender.id);
+            });
+        }
+        utilityWatchers.set(event.sender.id, {
+            watcher,
+            path: normalizedDirectoryPath,
+            knownEntries
+        });
+        return {
+            success: true,
+            path: normalizedDirectoryPath
+        };
+    });
+    electron_1.ipcMain.handle("utility:stop-file-watcher", async (event) => {
+        return stopUtilityWatcher(event.sender.id);
     });
     electron_1.ipcMain.handle("utility:get-directory-item-count", async (_event, directoryPath) => {
         const normalizedDirectoryPath = String(directoryPath || "").trim();
@@ -1870,6 +2174,93 @@ function registerIpcHandlers() {
         notepadDirtyState.set(win.id, Boolean(dirty));
     });
     electron_1.ipcMain.on("notepad:save-all-result", () => {
+    });
+    electron_1.ipcMain.handle("todos:list", () => {
+        return {
+            items: todosStore.get("items"),
+            moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+        };
+    });
+    electron_1.ipcMain.handle("todos:add", (_event, text) => {
+        const trimmedText = String(text || "").trim();
+        if (!trimmedText) {
+            return {
+                success: false,
+                items: todosStore.get("items")
+            };
+        }
+        const nextItems = applyTodoOrdering([
+            {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                text: trimmedText,
+                completed: false,
+                createdAt: Date.now()
+            },
+            ...todosStore.get("items")
+        ], todosStore.get("moveCompletedToBottom"));
+        todosStore.set("items", nextItems);
+        return {
+            success: true,
+            items: nextItems,
+            moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+        };
+    });
+    electron_1.ipcMain.handle("todos:toggle", (_event, id) => {
+        const nextItems = applyTodoOrdering(todosStore.get("items").map((item) => item.id === id
+            ? {
+                ...item,
+                completed: !item.completed
+            }
+            : item), todosStore.get("moveCompletedToBottom"));
+        todosStore.set("items", nextItems);
+        return {
+            success: true,
+            items: nextItems,
+            moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+        };
+    });
+    electron_1.ipcMain.handle("todos:delete", (_event, id) => {
+        const nextItems = todosStore.get("items").filter((item) => item.id !== id);
+        todosStore.set("items", nextItems);
+        return {
+            success: true,
+            items: nextItems,
+            moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+        };
+    });
+    electron_1.ipcMain.handle("todos:reorder", (_event, orderedIds) => {
+        const currentItems = todosStore.get("items");
+        const currentMap = new Map(currentItems.map((item) => [item.id, item]));
+        const nextItems = orderedIds
+            .map((id) => currentMap.get(id))
+            .filter((item) => Boolean(item));
+        const remainingItems = currentItems.filter((item) => !orderedIds.includes(item.id));
+        const finalItems = applyTodoOrdering([...nextItems, ...remainingItems], todosStore.get("moveCompletedToBottom"));
+        todosStore.set("items", finalItems);
+        return {
+            success: true,
+            items: finalItems,
+            moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+        };
+    });
+    electron_1.ipcMain.handle("todos:set-move-completed-to-bottom", (_event, value) => {
+        todosStore.set("moveCompletedToBottom", Boolean(value));
+        const nextItems = applyTodoOrdering(todosStore.get("items"), Boolean(value));
+        todosStore.set("items", nextItems);
+        return {
+            success: true,
+            items: nextItems,
+            moveCompletedToBottom: Boolean(value)
+        };
+    });
+    electron_1.ipcMain.handle("todos:clear-completed", () => {
+        const nextItems = todosStore.get("items").filter((item) => !item.completed);
+        todosStore.set("items", nextItems);
+        return {
+            success: true,
+            items: nextItems,
+            moveCompletedToBottom: todosStore.get("moveCompletedToBottom")
+        };
     });
 }
 electron_1.app.whenReady().then(async () => {
