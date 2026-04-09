@@ -10,7 +10,7 @@ const promises_1 = __importDefault(require("node:fs/promises"));
 const node_module_1 = require("node:module");
 const node_child_process_1 = require("node:child_process");
 const node_https_1 = __importDefault(require("node:https"));
-const electron_updater_1 = __importDefault(require("electron-updater"));
+const electron_updater_1 = require("electron-updater");
 const electron_log_1 = __importDefault(require("electron-log"));
 const runtime_config_1 = require("./runtime-config");
 electron_1.app.setName("Pokenix Studio");
@@ -24,7 +24,6 @@ const forceCloseWindowIds = new Set();
 const notepadDirtyState = new Map();
 const LOG_FILE_NAME = "pxs_logs.log";
 const LOG_FILE_MAX_SIZE = 15 * 1024 * 1024;
-const { autoUpdater } = electron_updater_1.default;
 const PLUGIN_PERMISSION_RULES = {
     ui: {
         safe: true,
@@ -252,25 +251,25 @@ function logError(message) {
     void writeLog("ERROR", message);
 }
 function configureAutoUpdater() {
-    autoUpdater.logger = electron_log_1.default;
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.on("checking-for-update", () => {
+    electron_updater_1.autoUpdater.logger = electron_log_1.default;
+    electron_updater_1.autoUpdater.autoDownload = true;
+    electron_updater_1.autoUpdater.autoInstallOnAppQuit = true;
+    electron_updater_1.autoUpdater.on("checking-for-update", () => {
         logInfo("Checking for app updates.");
     });
-    autoUpdater.on("update-available", (info) => {
+    electron_updater_1.autoUpdater.on("update-available", (info) => {
         logInfo(`Update available: ${info.version}.`);
     });
-    autoUpdater.on("update-not-available", (info) => {
+    electron_updater_1.autoUpdater.on("update-not-available", (info) => {
         logInfo(`No update available. Current latest version: ${info.version}.`);
     });
-    autoUpdater.on("error", (error) => {
+    electron_updater_1.autoUpdater.on("error", (error) => {
         logError(`Auto update error: ${error == null ? "Unknown error." : String(error)}`);
     });
-    autoUpdater.on("download-progress", (progress) => {
+    electron_updater_1.autoUpdater.on("download-progress", (progress) => {
         logInfo(`Update download progress: ${Math.round(progress.percent)}%.`);
     });
-    autoUpdater.on("update-downloaded", async (info) => {
+    electron_updater_1.autoUpdater.on("update-downloaded", async (info) => {
         logInfo(`Update downloaded: ${info.version}.`);
         const focusedWindow = electron_1.BrowserWindow.getFocusedWindow() ?? (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
         const messageBoxOptions = {
@@ -287,7 +286,7 @@ function configureAutoUpdater() {
             : await electron_1.dialog.showMessageBox(messageBoxOptions);
         if (result.response === 0) {
             logInfo(`Installing downloaded update ${info.version}.`);
-            autoUpdater.quitAndInstall();
+            electron_updater_1.autoUpdater.quitAndInstall();
         }
     });
 }
@@ -2479,7 +2478,7 @@ electron_1.app.whenReady().then(async () => {
         catch { }
     }
     if (electron_1.app.isPackaged) {
-        void autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+        void electron_updater_1.autoUpdater.checkForUpdatesAndNotify().catch((error) => {
             logError(`Failed to check for updates: ${error instanceof Error ? error.message : "Unknown error."}`);
         });
     }

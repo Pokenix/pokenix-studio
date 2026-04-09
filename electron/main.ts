@@ -15,7 +15,7 @@ import fs from "node:fs/promises"
 import { createRequire } from "node:module"
 import { spawn } from "node:child_process"
 import https from "node:https"
-import electronUpdater from "electron-updater"
+import { autoUpdater } from "electron-updater"
 import log from "electron-log"
 import { PLUGIN_NODE_VERSION } from "./runtime-config"
 
@@ -39,7 +39,6 @@ const forceCloseWindowIds = new Set<number>()
 const notepadDirtyState = new Map<number, boolean>()
 const LOG_FILE_NAME = "pxs_logs.log"
 const LOG_FILE_MAX_SIZE = 15 * 1024 * 1024
-const { autoUpdater } = electronUpdater
 
 type SettingsStore = {
   startWithSystem: boolean
