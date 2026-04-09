@@ -88,6 +88,7 @@ const hubAPI = {
     version: () => ipcRenderer.invoke("app:version"),
     openWebsite: () => ipcRenderer.invoke("app:open-website"),
     openExternalUrl: (url: string) => ipcRenderer.invoke("app:open-external-url", url),
+    openLogsDirectory: () => ipcRenderer.invoke("app:open-logs-directory"),
     onNavigate: (callback: (page: "home" | "plugins" | "themes" | "settings" | "console") => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,

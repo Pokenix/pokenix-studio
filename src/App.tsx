@@ -181,6 +181,7 @@ declare global {
         version: () => Promise<string>
         openWebsite: () => Promise<{ success: boolean }>
         openExternalUrl: (url: string) => Promise<{ success: boolean }>
+        openLogsDirectory: () => Promise<{ success: boolean }>
         onNavigate: (callback: (page: Page) => void) => () => void
       }
       windowState: {
@@ -532,7 +533,7 @@ function SettingsPage({
             className="notepad-action-btn"
             onClick={async () => {
               const confirmed = window.confirm(
-                "Reset plugins, remove the plugins and plugin-runtime folders, and require plugin setup again?"
+                "Reset plugins, remove the plugins and runtime folders, and require plugin setup again?"
               )
 
               if (!confirmed) return
@@ -577,6 +578,26 @@ function SettingsPage({
         <p style={{ marginTop: 10, wordBreak: "break-all" }}>
           Config path: {settingsPath || "Loading..."}
         </p>
+        <div className="settings-action-row">
+          <button
+            className="notepad-action-btn"
+            onClick={() => {
+              void window.hubAPI.app.openExternalUrl("https://www.pokenix.com/studio/report")
+            }}
+            type="button"
+          >
+            Report a Bug
+          </button>
+          <button
+            className="notepad-action-btn"
+            onClick={() => {
+              void window.hubAPI.app.openLogsDirectory()
+            }}
+            type="button"
+          >
+            Open Logs Folder
+          </button>
+        </div>
       </div>
     </div>
   )

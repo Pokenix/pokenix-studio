@@ -10,6 +10,8 @@ const promises_1 = __importDefault(require("node:fs/promises"));
 const node_module_1 = require("node:module");
 const node_child_process_1 = require("node:child_process");
 const node_https_1 = __importDefault(require("node:https"));
+const electron_updater_1 = __importDefault(require("electron-updater"));
+const electron_log_1 = __importDefault(require("electron-log"));
 const runtime_config_1 = require("./runtime-config");
 electron_1.app.setName("Pokenix Studio");
 let mainWindow = null;
@@ -20,6 +22,9 @@ const utilityWatchers = new Map();
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 const forceCloseWindowIds = new Set();
 const notepadDirtyState = new Map();
+const LOG_FILE_NAME = "pxs_logs.log";
+const LOG_FILE_MAX_SIZE = 15 * 1024 * 1024;
+const { autoUpdater } = electron_updater_1.default;
 const PLUGIN_PERMISSION_RULES = {
     ui: {
         safe: true,
@@ -70,13 +75,70 @@ let notesStore;
 let todosStore;
 let windowStateStore;
 let pluginStore;
+async function movePathIfNeeded(oldPath, newPath) {
+    try {
+        await promises_1.default.access(newPath);
+        return;
+    }
+    catch { }
+    try {
+        await promises_1.default.access(oldPath);
+    }
+    catch {
+        return;
+    }
+    await promises_1.default.mkdir(node_path_1.default.dirname(newPath), { recursive: true });
+    await promises_1.default.rename(oldPath, newPath);
+}
+async function migrateAppDataLayout() {
+    const rootDirectory = getConfigDirectory();
+    const settingsDirectory = getSettingsDirectory();
+    const dataDirectory = getDataDirectory();
+    const logsDirectory = getLogsDirectory();
+    const runtimeDirectory = getPluginRuntimeRootDirectory();
+    await promises_1.default.mkdir(settingsDirectory, { recursive: true });
+    await promises_1.default.mkdir(dataDirectory, { recursive: true });
+    await promises_1.default.mkdir(logsDirectory, { recursive: true });
+    const migrations = [
+        {
+            oldPath: node_path_1.default.join(rootDirectory, "config.json"),
+            newPath: node_path_1.default.join(settingsDirectory, "config.json")
+        },
+        {
+            oldPath: node_path_1.default.join(rootDirectory, "window-state.json"),
+            newPath: node_path_1.default.join(settingsDirectory, "window-state.json")
+        },
+        {
+            oldPath: node_path_1.default.join(rootDirectory, "plugins.json"),
+            newPath: node_path_1.default.join(settingsDirectory, "plugins.json")
+        },
+        {
+            oldPath: node_path_1.default.join(rootDirectory, "notes.json"),
+            newPath: node_path_1.default.join(dataDirectory, "notes.json")
+        },
+        {
+            oldPath: node_path_1.default.join(rootDirectory, "todos.json"),
+            newPath: node_path_1.default.join(dataDirectory, "todos.json")
+        },
+        {
+            oldPath: node_path_1.default.join(rootDirectory, "plugin-runtime"),
+            newPath: runtimeDirectory
+        }
+    ];
+    for (const migration of migrations) {
+        await movePathIfNeeded(migration.oldPath, migration.newPath);
+    }
+}
 async function initStores() {
     const { default: Store } = await import("electron-store");
+    await migrateAppDataLayout();
     settingsStore = new Store({
+        cwd: getSettingsDirectory(),
         name: "config",
         defaults: defaultSettings
     });
     notesStore = new Store({
+        cwd: getDataDirectory(),
         name: "notes",
         defaults: {
             notepadContent: "",
@@ -84,6 +146,7 @@ async function initStores() {
         }
     });
     todosStore = new Store({
+        cwd: getDataDirectory(),
         name: "todos",
         defaults: {
             items: [],
@@ -91,6 +154,7 @@ async function initStores() {
         }
     });
     pluginStore = new Store({
+        cwd: getSettingsDirectory(),
         name: "plugins",
         defaults: {
             pluginsEnabled: false,
@@ -99,6 +163,7 @@ async function initStores() {
         }
     });
     windowStateStore = new Store({
+        cwd: getSettingsDirectory(),
         name: "window-state",
         defaults: {
             main: {
@@ -126,7 +191,105 @@ function getSettings() {
     };
 }
 function getConfigDirectory() {
-    return node_path_1.default.dirname(settingsStore.path);
+    return electron_1.app.getPath("userData");
+}
+function getSettingsDirectory() {
+    return node_path_1.default.join(getConfigDirectory(), "settings");
+}
+function getDataDirectory() {
+    return node_path_1.default.join(getConfigDirectory(), "data");
+}
+function getLogsDirectory() {
+    return node_path_1.default.join(getConfigDirectory(), "logs");
+}
+function getLogFilePath() {
+    return node_path_1.default.join(getLogsDirectory(), LOG_FILE_NAME);
+}
+function trimLogContentToLimit(content, maxBytes) {
+    let current = content;
+    while (Buffer.byteLength(current, "utf8") > maxBytes) {
+        const newlineIndex = current.indexOf("\n");
+        if (newlineIndex === -1) {
+            return current.slice(-maxBytes);
+        }
+        current = current.slice(newlineIndex + 1);
+    }
+    return current;
+}
+function formatLogTimestamp() {
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, "0");
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const year = String(now.getFullYear());
+    const hours = String(now.getHours()).padStart(2, "0");
+    const minutes = String(now.getMinutes()).padStart(2, "0");
+    const seconds = String(now.getSeconds()).padStart(2, "0");
+    return `${day}.${month}.${year} ${hours}:${minutes}:${seconds}`;
+}
+async function writeLog(level, message) {
+    try {
+        const logDirectory = getLogsDirectory();
+        const logFilePath = getLogFilePath();
+        const entry = `[${formatLogTimestamp()}] [${level}] ${message}\n`;
+        await promises_1.default.mkdir(logDirectory, { recursive: true });
+        let currentContent = "";
+        try {
+            currentContent = await promises_1.default.readFile(logFilePath, "utf8");
+        }
+        catch { }
+        const nextContent = trimLogContentToLimit(currentContent + entry, LOG_FILE_MAX_SIZE);
+        await promises_1.default.writeFile(logFilePath, nextContent, "utf8");
+    }
+    catch { }
+}
+function logInfo(message) {
+    void writeLog("INFO", message);
+}
+function logWarn(message) {
+    void writeLog("WARN", message);
+}
+function logError(message) {
+    void writeLog("ERROR", message);
+}
+function configureAutoUpdater() {
+    autoUpdater.logger = electron_log_1.default;
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on("checking-for-update", () => {
+        logInfo("Checking for app updates.");
+    });
+    autoUpdater.on("update-available", (info) => {
+        logInfo(`Update available: ${info.version}.`);
+    });
+    autoUpdater.on("update-not-available", (info) => {
+        logInfo(`No update available. Current latest version: ${info.version}.`);
+    });
+    autoUpdater.on("error", (error) => {
+        logError(`Auto update error: ${error == null ? "Unknown error." : String(error)}`);
+    });
+    autoUpdater.on("download-progress", (progress) => {
+        logInfo(`Update download progress: ${Math.round(progress.percent)}%.`);
+    });
+    autoUpdater.on("update-downloaded", async (info) => {
+        logInfo(`Update downloaded: ${info.version}.`);
+        const focusedWindow = electron_1.BrowserWindow.getFocusedWindow() ?? (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
+        const messageBoxOptions = {
+            type: "info",
+            buttons: ["Restart Now", "Later"],
+            defaultId: 0,
+            cancelId: 1,
+            title: "Update Ready",
+            message: `Pokenix Studio ${info.version} is ready to install.`,
+            detail: "Restart the app now to finish updating."
+        };
+        const result = focusedWindow
+            ? await electron_1.dialog.showMessageBox(focusedWindow, messageBoxOptions)
+            : await electron_1.dialog.showMessageBox(messageBoxOptions);
+        if (result.response === 0) {
+            logInfo(`Installing downloaded update ${info.version}.`);
+            autoUpdater.quitAndInstall();
+        }
+    });
 }
 function getPluginsDirectory() {
     return node_path_1.default.join(getConfigDirectory(), "plugins");
@@ -135,7 +298,7 @@ async function ensurePluginsDirectory() {
     await promises_1.default.mkdir(getPluginsDirectory(), { recursive: true });
 }
 function getPluginRuntimeRootDirectory() {
-    return node_path_1.default.join(getConfigDirectory(), "plugin-runtime");
+    return node_path_1.default.join(getConfigDirectory(), "runtime");
 }
 function getPluginRuntimeVersionFilePath() {
     return node_path_1.default.join(getPluginRuntimeRootDirectory(), "runtime-version.json");
@@ -453,6 +616,7 @@ function disablePluginsGlobally() {
         }
         moduleWindows.delete(windowKey);
     }
+    logInfo("Plugins disabled globally.");
     notifyPluginStateChanged();
     return {
         enabled: false,
@@ -464,6 +628,7 @@ async function resetPlugins() {
     disablePluginsGlobally();
     await promises_1.default.rm(getPluginsDirectory(), { recursive: true, force: true });
     await promises_1.default.rm(getPluginRuntimeRootDirectory(), { recursive: true, force: true });
+    logInfo("Plugins were reset and plugin directories were removed.");
     return {
         enabled: false,
         path: getPluginsDirectory(),
@@ -471,14 +636,17 @@ async function resetPlugins() {
     };
 }
 function closeAllPluginWindows() {
+    let closedCount = 0;
     for (const [windowKey, win] of moduleWindows.entries()) {
         if (!windowKey.startsWith("plugin:"))
             continue;
         if (!win.isDestroyed()) {
             win.close();
+            closedCount += 1;
         }
         moduleWindows.delete(windowKey);
     }
+    logInfo(`Closed ${closedCount} plugin window${closedCount === 1 ? "" : "s"}.`);
     notifyPluginStateChanged();
     return { success: true };
 }
@@ -487,6 +655,7 @@ async function disableAllPlugins() {
     for (const plugin of installedPlugins.plugins) {
         setPluginDisabled(plugin.id, true);
     }
+    logInfo(`Disabled ${installedPlugins.plugins.length} plugin${installedPlugins.plugins.length === 1 ? "" : "s"}.`);
     closeAllPluginWindows();
     return { success: true };
 }
@@ -495,6 +664,7 @@ async function enableAllPlugins() {
     for (const plugin of installedPlugins.plugins) {
         setPluginDisabled(plugin.id, false);
     }
+    logInfo(`Enabled ${installedPlugins.plugins.length} plugin${installedPlugins.plugins.length === 1 ? "" : "s"}.`);
     notifyPluginStateChanged();
     return { success: true };
 }
@@ -840,6 +1010,7 @@ function createMainWindow() {
     }
     mainWindow.once("ready-to-show", () => {
         mainWindow?.show();
+        logInfo("Main window is ready.");
     });
     mainWindow.on("close", (event) => {
         const closeToTray = settingsStore.get("closeToTray");
@@ -848,17 +1019,20 @@ function createMainWindow() {
             if (closeToTray) {
                 event.preventDefault();
                 mainWindow?.hide();
+                logInfo("Main window hidden to tray.");
                 if (process.platform === "darwin" && electron_1.app.dock) {
                     electron_1.app.dock.hide();
                 }
             }
             else {
                 isQuitting = true;
+                logInfo("Main window requested app quit.");
                 electron_1.app.quit();
             }
         }
     });
     mainWindow.on("closed", () => {
+        logInfo("Main window closed.");
         mainWindow = null;
     });
 }
@@ -879,6 +1053,7 @@ function showMainWindow() {
         win.restore();
     }
     win.focus();
+    logInfo("Main window focused.");
     if (process.platform === "darwin" && electron_1.app.dock) {
         electron_1.app.dock.show();
     }
@@ -900,6 +1075,7 @@ function navigateMainWindow(page) {
     }
     win.focus();
     win.webContents.send("app:navigate", page);
+    logInfo(`Navigated main window to: ${page}`);
     if (process.platform === "darwin" && electron_1.app.dock) {
         electron_1.app.dock.show();
     }
@@ -1182,7 +1358,7 @@ function createApplicationMenu() {
                 {
                     label: "Open Config Folder",
                     click: () => {
-                        void electron_1.shell.openPath(node_path_1.default.dirname(settingsStore.path));
+                        void electron_1.shell.openPath(getConfigDirectory());
                     }
                 }
             ]
@@ -1233,6 +1409,7 @@ function createModuleWindow(moduleId, title) {
     if (existingWindow && !existingWindow.isDestroyed()) {
         existingWindow.show();
         existingWindow.focus();
+        logInfo(`Focused existing module window: ${moduleId}`);
         return;
     }
     const state = getWindowBounds("plugin", {
@@ -1260,6 +1437,7 @@ function createModuleWindow(moduleId, title) {
         ? `${process.env.VITE_DEV_SERVER_URL}?module=${moduleId}`
         : `file://${node_path_1.default.join(__dirname, "../dist/index.html")}?module=${moduleId}`;
     void moduleWindow.loadURL(moduleUrl);
+    logInfo(`Opened module window: ${moduleId}`);
     if (moduleId === "notepad") {
         moduleWindow.on("close", (event) => {
             void handleNotepadWindowClose(moduleWindow, event);
@@ -1268,6 +1446,7 @@ function createModuleWindow(moduleId, title) {
     moduleWindow.on("closed", () => {
         moduleWindows.delete(moduleId);
         notepadDirtyState.delete(moduleWindow.id);
+        logInfo(`Closed module window: ${moduleId}`);
     });
     moduleWindows.set(moduleId, moduleWindow);
 }
@@ -1291,9 +1470,11 @@ async function createPluginWindow(pluginId) {
             });
             if (result.response === 1) {
                 setPluginDisabled(pluginData.plugin.id, true);
+                logWarn(`Plugin disabled after unsafe permission prompt: ${pluginData.plugin.id}`);
                 return false;
             }
             if (result.response !== 0) {
+                logWarn(`Plugin launch cancelled from unsafe permission prompt: ${pluginData.plugin.id}`);
                 return false;
             }
             setApprovedUnsafePermissions(pluginData.plugin.id, [
@@ -1309,6 +1490,7 @@ async function createPluginWindow(pluginId) {
     }
     catch (error) {
         console.error("Failed to install plugin dependencies:", error);
+        logError(`Could not install dependencies for ${pluginData.plugin.id}: ${error instanceof Error ? error.message : "Unknown install error."}`);
         await electron_1.dialog.showMessageBox({
             type: "error",
             buttons: ["OK"],
@@ -1323,6 +1505,7 @@ async function createPluginWindow(pluginId) {
     if (existingWindow && !existingWindow.isDestroyed()) {
         existingWindow.show();
         existingWindow.focus();
+        logInfo(`Focused existing plugin window: ${pluginId}`);
         notifyPluginStateChanged();
         return true;
     }
@@ -1351,8 +1534,10 @@ async function createPluginWindow(pluginId) {
         ? `${process.env.VITE_DEV_SERVER_URL}?plugin=${encodeURIComponent(pluginId)}`
         : `file://${node_path_1.default.join(__dirname, "../dist/index.html")}?plugin=${encodeURIComponent(pluginId)}`;
     void pluginWindow.loadURL(pluginUrl);
+    logInfo(`Opened plugin window: ${pluginId}`);
     pluginWindow.on("closed", () => {
         moduleWindows.delete(windowKey);
+        logInfo(`Closed plugin window: ${pluginId}`);
         notifyPluginStateChanged();
     });
     moduleWindows.set(windowKey, pluginWindow);
@@ -1453,6 +1638,11 @@ function registerIpcHandlers() {
         await electron_1.shell.openExternal(normalizedUrl);
         return { success: true };
     });
+    electron_1.ipcMain.handle("app:open-logs-directory", async () => {
+        await promises_1.default.mkdir(getLogsDirectory(), { recursive: true });
+        await electron_1.shell.openPath(getLogsDirectory());
+        return { success: true };
+    });
     electron_1.ipcMain.handle("plugins:status", async () => {
         return {
             enabled: arePluginsEnabled(),
@@ -1542,6 +1732,7 @@ function registerIpcHandlers() {
     electron_1.ipcMain.handle("settings:set", (_event, key, value) => {
         try {
             settingsStore.set(key, value);
+            logInfo(`Setting updated: ${key}=${String(value)}`);
             if (key === "startWithSystem" && !isDev) {
                 try {
                     electron_1.app.setLoginItemSettings({
@@ -1558,6 +1749,7 @@ function registerIpcHandlers() {
         }
         catch (error) {
             console.error("Failed to save setting:", key, error);
+            logError(`Failed to save setting ${String(key)}: ${error instanceof Error ? error.message : "Unknown error."}`);
             return {
                 success: false,
                 settings: getSettings(),
@@ -1566,7 +1758,7 @@ function registerIpcHandlers() {
         }
     });
     electron_1.ipcMain.handle("settings:path", () => {
-        return settingsStore.path;
+        return getConfigDirectory();
     });
     electron_1.ipcMain.handle("settings:reset", () => {
         try {
@@ -1591,6 +1783,7 @@ function registerIpcHandlers() {
         }
         catch (error) {
             console.error("Failed to reset settings:", error);
+            logError(`Failed to reset settings: ${error instanceof Error ? error.message : "Unknown error."}`);
             return {
                 success: false,
                 settings: getSettings(),
@@ -2265,13 +2458,16 @@ function registerIpcHandlers() {
 }
 electron_1.app.whenReady().then(async () => {
     await initStores();
+    logInfo(`App started. Version ${electron_1.app.getVersion()}.`);
     registerIpcHandlers();
+    configureAutoUpdater();
     createApplicationMenu();
     createMainWindow();
     createTray();
     if (pluginStore.get("pluginsEnabled")) {
         void ensurePluginNodeRuntimeInstalled(mainWindow?.webContents ?? null).catch((error) => {
             console.error("Failed to update plugin runtime:", error);
+            logError(`Failed to update plugin runtime: ${error instanceof Error ? error.message : "Unknown error."}`);
         });
     }
     if (!isDev) {
@@ -2282,12 +2478,26 @@ electron_1.app.whenReady().then(async () => {
         }
         catch { }
     }
+    if (electron_1.app.isPackaged) {
+        void autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+            logError(`Failed to check for updates: ${error instanceof Error ? error.message : "Unknown error."}`);
+        });
+    }
     electron_1.app.on("activate", () => {
+        logInfo("App activate event fired.");
         showMainWindow();
     });
 });
 electron_1.app.on("before-quit", () => {
     isQuitting = true;
+    logInfo("App is quitting.");
 });
 electron_1.app.on("window-all-closed", () => {
+    logInfo("All windows closed.");
+});
+process.on("uncaughtException", (error) => {
+    logError(`Uncaught exception: ${error instanceof Error ? error.stack || error.message : String(error)}`);
+});
+process.on("unhandledRejection", (reason) => {
+    logError(`Unhandled rejection: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`);
 });

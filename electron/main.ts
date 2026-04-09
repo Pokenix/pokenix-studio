@@ -15,6 +15,8 @@ import fs from "node:fs/promises"
 import { createRequire } from "node:module"
 import { spawn } from "node:child_process"
 import https from "node:https"
+import electronUpdater from "electron-updater"
+import log from "electron-log"
 import { PLUGIN_NODE_VERSION } from "./runtime-config"
 
 app.setName("Pokenix Studio")
@@ -35,6 +37,9 @@ const utilityWatchers = new Map<
 const isDev = !!process.env.VITE_DEV_SERVER_URL
 const forceCloseWindowIds = new Set<number>()
 const notepadDirtyState = new Map<number, boolean>()
+const LOG_FILE_NAME = "pxs_logs.log"
+const LOG_FILE_MAX_SIZE = 15 * 1024 * 1024
+const { autoUpdater } = electronUpdater
 
 type SettingsStore = {
   startWithSystem: boolean
@@ -86,6 +91,11 @@ type StoreLike<T> = {
   get: <K extends keyof T>(key: K) => T[K]
   set: <K extends keyof T>(key: K, value: T[K]) => void
   path: string
+}
+
+type StoreMigration = {
+  oldPath: string
+  newPath: string
 }
 
 type PluginManifest = {
@@ -170,15 +180,78 @@ let todosStore: StoreLike<TodosStore>
 let windowStateStore: StoreLike<WindowStateStore>
 let pluginStore: StoreLike<PluginStore>
 
+async function movePathIfNeeded(oldPath: string, newPath: string) {
+  try {
+    await fs.access(newPath)
+    return
+  } catch {}
+
+  try {
+    await fs.access(oldPath)
+  } catch {
+    return
+  }
+
+  await fs.mkdir(path.dirname(newPath), { recursive: true })
+  await fs.rename(oldPath, newPath)
+}
+
+async function migrateAppDataLayout() {
+  const rootDirectory = getConfigDirectory()
+  const settingsDirectory = getSettingsDirectory()
+  const dataDirectory = getDataDirectory()
+  const logsDirectory = getLogsDirectory()
+  const runtimeDirectory = getPluginRuntimeRootDirectory()
+
+  await fs.mkdir(settingsDirectory, { recursive: true })
+  await fs.mkdir(dataDirectory, { recursive: true })
+  await fs.mkdir(logsDirectory, { recursive: true })
+
+  const migrations: StoreMigration[] = [
+    {
+      oldPath: path.join(rootDirectory, "config.json"),
+      newPath: path.join(settingsDirectory, "config.json")
+    },
+    {
+      oldPath: path.join(rootDirectory, "window-state.json"),
+      newPath: path.join(settingsDirectory, "window-state.json")
+    },
+    {
+      oldPath: path.join(rootDirectory, "plugins.json"),
+      newPath: path.join(settingsDirectory, "plugins.json")
+    },
+    {
+      oldPath: path.join(rootDirectory, "notes.json"),
+      newPath: path.join(dataDirectory, "notes.json")
+    },
+    {
+      oldPath: path.join(rootDirectory, "todos.json"),
+      newPath: path.join(dataDirectory, "todos.json")
+    },
+    {
+      oldPath: path.join(rootDirectory, "plugin-runtime"),
+      newPath: runtimeDirectory
+    }
+  ]
+
+  for (const migration of migrations) {
+    await movePathIfNeeded(migration.oldPath, migration.newPath)
+  }
+}
+
 async function initStores() {
   const { default: Store } = await import("electron-store")
 
+  await migrateAppDataLayout()
+
   settingsStore = new Store<SettingsStore>({
+    cwd: getSettingsDirectory(),
     name: "config",
     defaults: defaultSettings
   }) as StoreLike<SettingsStore>
 
   notesStore = new Store<NotesStore>({
+    cwd: getDataDirectory(),
     name: "notes",
     defaults: {
       notepadContent: "",
@@ -187,6 +260,7 @@ async function initStores() {
   }) as StoreLike<NotesStore>
 
   todosStore = new Store<TodosStore>({
+    cwd: getDataDirectory(),
     name: "todos",
     defaults: {
       items: [],
@@ -195,6 +269,7 @@ async function initStores() {
   }) as StoreLike<TodosStore>
 
   pluginStore = new Store<PluginStore>({
+    cwd: getSettingsDirectory(),
     name: "plugins",
     defaults: {
       pluginsEnabled: false,
@@ -204,6 +279,7 @@ async function initStores() {
   }) as StoreLike<PluginStore>
 
   windowStateStore = new Store<WindowStateStore>({
+    cwd: getSettingsDirectory(),
     name: "window-state",
     defaults: {
       main: {
@@ -233,7 +309,134 @@ function getSettings(): SettingsStore {
 }
 
 function getConfigDirectory() {
-  return path.dirname(settingsStore.path)
+  return app.getPath("userData")
+}
+
+function getSettingsDirectory() {
+  return path.join(getConfigDirectory(), "settings")
+}
+
+function getDataDirectory() {
+  return path.join(getConfigDirectory(), "data")
+}
+
+function getLogsDirectory() {
+  return path.join(getConfigDirectory(), "logs")
+}
+
+function getLogFilePath() {
+  return path.join(getLogsDirectory(), LOG_FILE_NAME)
+}
+
+function trimLogContentToLimit(content: string, maxBytes: number) {
+  let current = content
+
+  while (Buffer.byteLength(current, "utf8") > maxBytes) {
+    const newlineIndex = current.indexOf("\n")
+
+    if (newlineIndex === -1) {
+      return current.slice(-maxBytes)
+    }
+
+    current = current.slice(newlineIndex + 1)
+  }
+
+  return current
+}
+
+function formatLogTimestamp() {
+  const now = new Date()
+  const day = String(now.getDate()).padStart(2, "0")
+  const month = String(now.getMonth() + 1).padStart(2, "0")
+  const year = String(now.getFullYear())
+  const hours = String(now.getHours()).padStart(2, "0")
+  const minutes = String(now.getMinutes()).padStart(2, "0")
+  const seconds = String(now.getSeconds()).padStart(2, "0")
+
+  return `${day}.${month}.${year} ${hours}:${minutes}:${seconds}`
+}
+
+async function writeLog(level: "INFO" | "WARN" | "ERROR", message: string) {
+  try {
+    const logDirectory = getLogsDirectory()
+    const logFilePath = getLogFilePath()
+    const entry = `[${formatLogTimestamp()}] [${level}] ${message}\n`
+
+    await fs.mkdir(logDirectory, { recursive: true })
+
+    let currentContent = ""
+
+    try {
+      currentContent = await fs.readFile(logFilePath, "utf8")
+    } catch {}
+
+    const nextContent = trimLogContentToLimit(currentContent + entry, LOG_FILE_MAX_SIZE)
+    await fs.writeFile(logFilePath, nextContent, "utf8")
+  } catch {}
+}
+
+function logInfo(message: string) {
+  void writeLog("INFO", message)
+}
+
+function logWarn(message: string) {
+  void writeLog("WARN", message)
+}
+
+function logError(message: string) {
+  void writeLog("ERROR", message)
+}
+
+function configureAutoUpdater() {
+  autoUpdater.logger = log
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on("checking-for-update", () => {
+    logInfo("Checking for app updates.")
+  })
+
+  autoUpdater.on("update-available", (info) => {
+    logInfo(`Update available: ${info.version}.`)
+  })
+
+  autoUpdater.on("update-not-available", (info) => {
+    logInfo(`No update available. Current latest version: ${info.version}.`)
+  })
+
+  autoUpdater.on("error", (error) => {
+    logError(`Auto update error: ${error == null ? "Unknown error." : String(error)}`)
+  })
+
+  autoUpdater.on("download-progress", (progress) => {
+    logInfo(`Update download progress: ${Math.round(progress.percent)}%.`)
+  })
+
+  autoUpdater.on("update-downloaded", async (info) => {
+    logInfo(`Update downloaded: ${info.version}.`)
+
+    const focusedWindow =
+      BrowserWindow.getFocusedWindow() ?? (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null)
+
+    const messageBoxOptions = {
+      type: "info" as const,
+      buttons: ["Restart Now", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "Update Ready",
+      message: `Pokenix Studio ${info.version} is ready to install.`,
+      detail: "Restart the app now to finish updating."
+    }
+
+    const result = focusedWindow
+      ? await dialog.showMessageBox(focusedWindow, messageBoxOptions)
+      : await dialog.showMessageBox(messageBoxOptions)
+
+    if (result.response === 0) {
+      logInfo(`Installing downloaded update ${info.version}.`)
+      autoUpdater.quitAndInstall()
+    }
+  })
 }
 
 function getPluginsDirectory() {
@@ -245,7 +448,7 @@ async function ensurePluginsDirectory() {
 }
 
 function getPluginRuntimeRootDirectory() {
-  return path.join(getConfigDirectory(), "plugin-runtime")
+  return path.join(getConfigDirectory(), "runtime")
 }
 
 function getPluginRuntimeVersionFilePath() {
@@ -649,6 +852,7 @@ function disablePluginsGlobally() {
     moduleWindows.delete(windowKey)
   }
 
+  logInfo("Plugins disabled globally.")
   notifyPluginStateChanged()
 
   return {
@@ -664,6 +868,8 @@ async function resetPlugins() {
   await fs.rm(getPluginsDirectory(), { recursive: true, force: true })
   await fs.rm(getPluginRuntimeRootDirectory(), { recursive: true, force: true })
 
+  logInfo("Plugins were reset and plugin directories were removed.")
+
   return {
     enabled: false,
     path: getPluginsDirectory(),
@@ -672,16 +878,20 @@ async function resetPlugins() {
 }
 
 function closeAllPluginWindows() {
+  let closedCount = 0
+
   for (const [windowKey, win] of moduleWindows.entries()) {
     if (!windowKey.startsWith("plugin:")) continue
 
     if (!win.isDestroyed()) {
       win.close()
+      closedCount += 1
     }
 
     moduleWindows.delete(windowKey)
   }
 
+  logInfo(`Closed ${closedCount} plugin window${closedCount === 1 ? "" : "s"}.`)
   notifyPluginStateChanged()
   return { success: true }
 }
@@ -693,6 +903,7 @@ async function disableAllPlugins() {
     setPluginDisabled(plugin.id, true)
   }
 
+  logInfo(`Disabled ${installedPlugins.plugins.length} plugin${installedPlugins.plugins.length === 1 ? "" : "s"}.`)
   closeAllPluginWindows()
   return { success: true }
 }
@@ -704,6 +915,7 @@ async function enableAllPlugins() {
     setPluginDisabled(plugin.id, false)
   }
 
+  logInfo(`Enabled ${installedPlugins.plugins.length} plugin${installedPlugins.plugins.length === 1 ? "" : "s"}.`)
   notifyPluginStateChanged()
   return { success: true }
 }
@@ -1119,6 +1331,7 @@ function createMainWindow() {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show()
+    logInfo("Main window is ready.")
   })
 
   mainWindow.on("close", (event) => {
@@ -1130,18 +1343,21 @@ function createMainWindow() {
       if (closeToTray) {
         event.preventDefault()
         mainWindow?.hide()
+        logInfo("Main window hidden to tray.")
 
         if (process.platform === "darwin" && app.dock) {
           app.dock.hide()
         }
       } else {
         isQuitting = true
+        logInfo("Main window requested app quit.")
         app.quit()
       }
     }
   })
 
   mainWindow.on("closed", () => {
+    logInfo("Main window closed.")
     mainWindow = null
   })
 }
@@ -1165,6 +1381,7 @@ function showMainWindow() {
   }
 
   win.focus()
+  logInfo("Main window focused.")
 
   if (process.platform === "darwin" && app.dock) {
     app.dock.show()
@@ -1190,6 +1407,7 @@ function navigateMainWindow(page: Page) {
 
   win.focus()
   win.webContents.send("app:navigate", page)
+  logInfo(`Navigated main window to: ${page}`)
 
   if (process.platform === "darwin" && app.dock) {
     app.dock.show()
@@ -1541,7 +1759,7 @@ function createApplicationMenu() {
         {
           label: "Open Config Folder",
           click: () => {
-            void shell.openPath(path.dirname(settingsStore.path))
+            void shell.openPath(getConfigDirectory())
           }
         }
       ]
@@ -1602,6 +1820,7 @@ function createModuleWindow(moduleId: string, title: string) {
   if (existingWindow && !existingWindow.isDestroyed()) {
     existingWindow.show()
     existingWindow.focus()
+    logInfo(`Focused existing module window: ${moduleId}`)
     return
   }
 
@@ -1634,6 +1853,7 @@ function createModuleWindow(moduleId: string, title: string) {
     : `file://${path.join(__dirname, "../dist/index.html")}?module=${moduleId}`
 
   void moduleWindow.loadURL(moduleUrl)
+  logInfo(`Opened module window: ${moduleId}`)
 
   if (moduleId === "notepad") {
     moduleWindow.on("close", (event) => {
@@ -1644,6 +1864,7 @@ function createModuleWindow(moduleId: string, title: string) {
   moduleWindow.on("closed", () => {
     moduleWindows.delete(moduleId)
     notepadDirtyState.delete(moduleWindow.id)
+    logInfo(`Closed module window: ${moduleId}`)
   })
 
   moduleWindows.set(moduleId, moduleWindow)
@@ -1673,10 +1894,12 @@ async function createPluginWindow(pluginId: string) {
 
       if (result.response === 1) {
         setPluginDisabled(pluginData.plugin.id, true)
+        logWarn(`Plugin disabled after unsafe permission prompt: ${pluginData.plugin.id}`)
         return false
       }
 
       if (result.response !== 0) {
+        logWarn(`Plugin launch cancelled from unsafe permission prompt: ${pluginData.plugin.id}`)
         return false
       }
 
@@ -1693,6 +1916,11 @@ async function createPluginWindow(pluginId: string) {
     }
   } catch (error) {
     console.error("Failed to install plugin dependencies:", error)
+    logError(
+      `Could not install dependencies for ${pluginData.plugin.id}: ${
+        error instanceof Error ? error.message : "Unknown install error."
+      }`
+    )
 
     await dialog.showMessageBox({
       type: "error",
@@ -1711,6 +1939,7 @@ async function createPluginWindow(pluginId: string) {
   if (existingWindow && !existingWindow.isDestroyed()) {
     existingWindow.show()
     existingWindow.focus()
+    logInfo(`Focused existing plugin window: ${pluginId}`)
     notifyPluginStateChanged()
     return true
   }
@@ -1744,9 +1973,11 @@ async function createPluginWindow(pluginId: string) {
     : `file://${path.join(__dirname, "../dist/index.html")}?plugin=${encodeURIComponent(pluginId)}`
 
   void pluginWindow.loadURL(pluginUrl)
+  logInfo(`Opened plugin window: ${pluginId}`)
 
   pluginWindow.on("closed", () => {
     moduleWindows.delete(windowKey)
+    logInfo(`Closed plugin window: ${pluginId}`)
     notifyPluginStateChanged()
   })
 
@@ -1877,6 +2108,12 @@ function registerIpcHandlers() {
     return { success: true }
   })
 
+  ipcMain.handle("app:open-logs-directory", async () => {
+    await fs.mkdir(getLogsDirectory(), { recursive: true })
+    await shell.openPath(getLogsDirectory())
+    return { success: true }
+  })
+
   ipcMain.handle("plugins:status", async () => {
     return {
       enabled: arePluginsEnabled(),
@@ -1990,6 +2227,7 @@ function registerIpcHandlers() {
     (_event, key: keyof SettingsStore, value: boolean) => {
       try {
         settingsStore.set(key, value)
+        logInfo(`Setting updated: ${key}=${String(value)}`)
 
         if (key === "startWithSystem" && !isDev) {
           try {
@@ -2006,6 +2244,11 @@ function registerIpcHandlers() {
         }
       } catch (error) {
         console.error("Failed to save setting:", key, error)
+        logError(
+          `Failed to save setting ${String(key)}: ${
+            error instanceof Error ? error.message : "Unknown error."
+          }`
+        )
 
         return {
           success: false,
@@ -2017,7 +2260,7 @@ function registerIpcHandlers() {
   )
 
   ipcMain.handle("settings:path", () => {
-    return settingsStore.path
+    return getConfigDirectory()
   })
 
   ipcMain.handle("settings:reset", () => {
@@ -2043,6 +2286,9 @@ function registerIpcHandlers() {
       }
     } catch (error) {
       console.error("Failed to reset settings:", error)
+      logError(
+        `Failed to reset settings: ${error instanceof Error ? error.message : "Unknown error."}`
+      )
 
       return {
         success: false,
@@ -2869,8 +3115,10 @@ function registerIpcHandlers() {
 
 app.whenReady().then(async () => {
   await initStores()
+  logInfo(`App started. Version ${app.getVersion()}.`)
 
   registerIpcHandlers()
+  configureAutoUpdater()
   createApplicationMenu()
   createMainWindow()
   createTray()
@@ -2878,6 +3126,9 @@ app.whenReady().then(async () => {
   if (pluginStore.get("pluginsEnabled")) {
     void ensurePluginNodeRuntimeInstalled(mainWindow?.webContents ?? null).catch((error) => {
       console.error("Failed to update plugin runtime:", error)
+      logError(
+        `Failed to update plugin runtime: ${error instanceof Error ? error.message : "Unknown error."}`
+      )
     })
   }
 
@@ -2889,14 +3140,33 @@ app.whenReady().then(async () => {
     } catch {}
   }
 
+  if (app.isPackaged) {
+    void autoUpdater.checkForUpdatesAndNotify().catch((error) => {
+      logError(
+        `Failed to check for updates: ${error instanceof Error ? error.message : "Unknown error."}`
+      )
+    })
+  }
+
   app.on("activate", () => {
+    logInfo("App activate event fired.")
     showMainWindow()
   })
 })
 
 app.on("before-quit", () => {
   isQuitting = true
+  logInfo("App is quitting.")
 })
 
 app.on("window-all-closed", () => {
+  logInfo("All windows closed.")
+})
+
+process.on("uncaughtException", (error) => {
+  logError(`Uncaught exception: ${error instanceof Error ? error.stack || error.message : String(error)}`)
+})
+
+process.on("unhandledRejection", (reason) => {
+  logError(`Unhandled rejection: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`)
 })
