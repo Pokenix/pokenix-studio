@@ -17,6 +17,7 @@ electron_1.app.setName("Pokenix Studio");
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
+let updateProgressWindow = null;
 const moduleWindows = new Map();
 const utilityWatchers = new Map();
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
@@ -250,28 +251,183 @@ function logWarn(message) {
 function logError(message) {
     void writeLog("ERROR", message);
 }
+function getFocusedAppWindow() {
+    return electron_1.BrowserWindow.getFocusedWindow() ?? (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
+}
+function createOrShowUpdateProgressWindow(version) {
+    if (updateProgressWindow && !updateProgressWindow.isDestroyed()) {
+        updateProgressWindow.show();
+        updateProgressWindow.focus();
+        return updateProgressWindow;
+    }
+    const parentWindow = getFocusedAppWindow();
+    updateProgressWindow = new electron_1.BrowserWindow({
+        width: 420,
+        height: 220,
+        resizable: false,
+        minimizable: false,
+        maximizable: false,
+        fullscreenable: false,
+        show: false,
+        title: "Downloading Update",
+        autoHideMenuBar: true,
+        modal: Boolean(parentWindow),
+        parent: parentWindow ?? undefined,
+        webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false
+        }
+    });
+    const html = `
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>Downloading Update</title>
+        <style>
+          body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #0f1319;
+            color: #f5f7fb;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+          }
+          .wrap {
+            width: 100%;
+            max-width: 340px;
+            padding: 24px;
+          }
+          .eyebrow {
+            margin: 0 0 10px;
+            font-size: 12px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: #8ea0b7;
+          }
+          .title {
+            margin: 0 0 14px;
+            font-size: 28px;
+            line-height: 1.1;
+            font-weight: 700;
+          }
+          .text {
+            margin: 0 0 16px;
+            color: #c7d0dc;
+            font-size: 15px;
+          }
+          .bar {
+            width: 100%;
+            height: 10px;
+            border-radius: 999px;
+            background: #222934;
+            overflow: hidden;
+          }
+          .fill {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #7aa2ff, #4fd1c5);
+            transition: width 120ms linear;
+          }
+          .percent {
+            margin-top: 12px;
+            text-align: right;
+            color: #8ea0b7;
+            font-size: 14px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="wrap">
+          <p class="eyebrow">Update</p>
+          <h1 class="title">Downloading...</h1>
+          <p class="text">Pokenix Studio ${version} is being downloaded.</p>
+          <div class="bar"><div class="fill" id="fill"></div></div>
+          <div class="percent" id="percent">0%</div>
+        </div>
+        <script>
+          window.setProgress = function (value) {
+            const percent = Math.max(0, Math.min(100, Number(value) || 0));
+            document.getElementById("fill").style.width = percent + "%";
+            document.getElementById("percent").textContent = percent + "%";
+          };
+        </script>
+      </body>
+    </html>
+  `;
+    void updateProgressWindow.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`);
+    updateProgressWindow.once("ready-to-show", () => {
+        updateProgressWindow?.show();
+    });
+    updateProgressWindow.on("closed", () => {
+        updateProgressWindow = null;
+    });
+    return updateProgressWindow;
+}
+function updateDownloadProgressWindow(percent) {
+    if (!updateProgressWindow || updateProgressWindow.isDestroyed())
+        return;
+    void updateProgressWindow.webContents.executeJavaScript(`window.setProgress(${Math.round(percent)})`);
+}
+function closeUpdateProgressWindow() {
+    if (!updateProgressWindow || updateProgressWindow.isDestroyed()) {
+        updateProgressWindow = null;
+        return;
+    }
+    updateProgressWindow.close();
+    updateProgressWindow = null;
+}
 function configureAutoUpdater() {
     electron_updater_1.autoUpdater.logger = electron_log_1.default;
-    electron_updater_1.autoUpdater.autoDownload = true;
+    electron_updater_1.autoUpdater.autoDownload = false;
     electron_updater_1.autoUpdater.autoInstallOnAppQuit = true;
     electron_updater_1.autoUpdater.on("checking-for-update", () => {
         logInfo("Checking for app updates.");
     });
-    electron_updater_1.autoUpdater.on("update-available", (info) => {
+    electron_updater_1.autoUpdater.on("update-available", async (info) => {
         logInfo(`Update available: ${info.version}.`);
+        const focusedWindow = getFocusedAppWindow();
+        const messageBoxOptions = {
+            type: "info",
+            buttons: ["Download Now", "Later"],
+            defaultId: 0,
+            cancelId: 1,
+            title: "Update Available",
+            message: `Pokenix Studio ${info.version} is available.`,
+            detail: "Do you want to download the update now?"
+        };
+        const result = focusedWindow
+            ? await electron_1.dialog.showMessageBox(focusedWindow, messageBoxOptions)
+            : await electron_1.dialog.showMessageBox(messageBoxOptions);
+        if (result.response === 0) {
+            logInfo(`Starting update download for version ${info.version}.`);
+            createOrShowUpdateProgressWindow(info.version);
+            void electron_updater_1.autoUpdater.downloadUpdate().catch((error) => {
+                closeUpdateProgressWindow();
+                logError(`Failed to download update ${info.version}: ${error instanceof Error ? error.message : "Unknown error."}`);
+            });
+        }
+        else {
+            logInfo(`Update download postponed for version ${info.version}.`);
+        }
     });
     electron_updater_1.autoUpdater.on("update-not-available", (info) => {
         logInfo(`No update available. Current latest version: ${info.version}.`);
     });
     electron_updater_1.autoUpdater.on("error", (error) => {
+        closeUpdateProgressWindow();
         logError(`Auto update error: ${error == null ? "Unknown error." : String(error)}`);
     });
     electron_updater_1.autoUpdater.on("download-progress", (progress) => {
         logInfo(`Update download progress: ${Math.round(progress.percent)}%.`);
+        updateDownloadProgressWindow(progress.percent);
     });
     electron_updater_1.autoUpdater.on("update-downloaded", async (info) => {
         logInfo(`Update downloaded: ${info.version}.`);
-        const focusedWindow = electron_1.BrowserWindow.getFocusedWindow() ?? (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
+        closeUpdateProgressWindow();
+        const focusedWindow = getFocusedAppWindow();
         const messageBoxOptions = {
             type: "info",
             buttons: ["Restart Now", "Later"],

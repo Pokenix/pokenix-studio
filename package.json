@@ -1,7 +1,7 @@
 {
   "name": "pokenix-studio",
   "productName": "Pokenix Studio",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Pokenix Studio - modular desktop productivity hub",
   "author": "Demir <demirk2@pokenix.com>",
   "homepage": "https://pokenix.com/studio",
@@ -27,7 +27,8 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "artifactName": "Pokenix-Studio-Setup-${version}.${ext}"
     },
     "publish": [
       {
