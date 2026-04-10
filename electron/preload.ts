@@ -4,7 +4,13 @@ const hubAPI = {
   settings: {
     get: () => ipcRenderer.invoke("settings:get"),
     set: (
-      key: "startWithSystem" | "closeToTray" | "darkTheme" | "openNewTabs" | "developerMode",
+      key:
+        | "startWithSystem"
+        | "startMinimized"
+        | "closeToTray"
+        | "darkTheme"
+        | "openNewTabs"
+        | "developerMode",
       value: boolean
     ) => ipcRenderer.invoke("settings:set", key, value),
     path: () => ipcRenderer.invoke("settings:path"),
@@ -88,6 +94,7 @@ const hubAPI = {
     version: () => ipcRenderer.invoke("app:version"),
     openWebsite: () => ipcRenderer.invoke("app:open-website"),
     openExternalUrl: (url: string) => ipcRenderer.invoke("app:open-external-url", url),
+    checkForUpdates: () => ipcRenderer.invoke("app:check-for-updates"),
     openLogsDirectory: () => ipcRenderer.invoke("app:open-logs-directory"),
     onNavigate: (callback: (page: "home" | "plugins" | "themes" | "settings" | "console") => void) => {
       const listener = (

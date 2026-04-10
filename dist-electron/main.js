@@ -11,13 +11,13 @@ const node_module_1 = require("node:module");
 const node_child_process_1 = require("node:child_process");
 const node_https_1 = __importDefault(require("node:https"));
 const electron_updater_1 = require("electron-updater");
-const electron_log_1 = __importDefault(require("electron-log"));
 const runtime_config_1 = require("./runtime-config");
 electron_1.app.setName("Pokenix Studio");
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let updateProgressWindow = null;
+let manualUpdateCheckRequested = false;
 const moduleWindows = new Map();
 const utilityWatchers = new Map();
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
@@ -65,6 +65,7 @@ const PLUGIN_PERMISSION_RULES = {
 };
 const defaultSettings = {
     startWithSystem: false,
+    startMinimized: false,
     closeToTray: true,
     darkTheme: true,
     openNewTabs: true,
@@ -184,11 +185,37 @@ async function initStores() {
 function getSettings() {
     return {
         startWithSystem: settingsStore.get("startWithSystem"),
+        startMinimized: settingsStore.get("startMinimized"),
         closeToTray: settingsStore.get("closeToTray"),
         darkTheme: settingsStore.get("darkTheme"),
         openNewTabs: settingsStore.get("openNewTabs"),
         developerMode: settingsStore.get("developerMode")
     };
+}
+function updateLoginItemSettings() {
+    if (isDev)
+        return;
+    try {
+        electron_1.app.setLoginItemSettings({
+            openAtLogin: settingsStore.get("startWithSystem"),
+            openAsHidden: settingsStore.get("startWithSystem") && settingsStore.get("startMinimized")
+        });
+    }
+    catch { }
+}
+function shouldStartMinimizedOnLaunch() {
+    if (isDev)
+        return false;
+    if (!settingsStore.get("startWithSystem"))
+        return false;
+    if (!settingsStore.get("startMinimized"))
+        return false;
+    try {
+        return Boolean(electron_1.app.getLoginItemSettings().wasOpenedAtLogin);
+    }
+    catch {
+        return false;
+    }
 }
 function getConfigDirectory() {
     return electron_1.app.getPath("userData");
@@ -251,6 +278,17 @@ function logWarn(message) {
 function logError(message) {
     void writeLog("ERROR", message);
 }
+const updaterLogger = {
+    info(message) {
+        logInfo(message);
+    },
+    warn(message) {
+        logWarn(message);
+    },
+    error(message) {
+        logError(message);
+    }
+};
 function getFocusedAppWindow() {
     return electron_1.BrowserWindow.getFocusedWindow() ?? (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
 }
@@ -380,7 +418,7 @@ function closeUpdateProgressWindow() {
     updateProgressWindow = null;
 }
 function configureAutoUpdater() {
-    electron_updater_1.autoUpdater.logger = electron_log_1.default;
+    electron_updater_1.autoUpdater.logger = updaterLogger;
     electron_updater_1.autoUpdater.autoDownload = false;
     electron_updater_1.autoUpdater.autoInstallOnAppQuit = true;
     electron_updater_1.autoUpdater.on("checking-for-update", () => {
@@ -388,6 +426,7 @@ function configureAutoUpdater() {
     });
     electron_updater_1.autoUpdater.on("update-available", async (info) => {
         logInfo(`Update available: ${info.version}.`);
+        manualUpdateCheckRequested = false;
         const focusedWindow = getFocusedAppWindow();
         const messageBoxOptions = {
             type: "info",
@@ -415,9 +454,39 @@ function configureAutoUpdater() {
     });
     electron_updater_1.autoUpdater.on("update-not-available", (info) => {
         logInfo(`No update available. Current latest version: ${info.version}.`);
+        if (manualUpdateCheckRequested) {
+            manualUpdateCheckRequested = false;
+            const focusedWindow = getFocusedAppWindow();
+            const options = {
+                type: "info",
+                buttons: ["OK"],
+                defaultId: 0,
+                title: "No Updates Found",
+                message: `Pokenix Studio ${electron_1.app.getVersion()} is up to date.`,
+                detail: `Latest available version: ${info.version}`
+            };
+            void (focusedWindow
+                ? electron_1.dialog.showMessageBox(focusedWindow, options)
+                : electron_1.dialog.showMessageBox(options));
+        }
     });
     electron_updater_1.autoUpdater.on("error", (error) => {
         closeUpdateProgressWindow();
+        if (manualUpdateCheckRequested) {
+            manualUpdateCheckRequested = false;
+            const focusedWindow = getFocusedAppWindow();
+            const options = {
+                type: "error",
+                buttons: ["OK"],
+                defaultId: 0,
+                title: "Update Check Failed",
+                message: "Pokenix Studio could not check for updates.",
+                detail: error == null ? "Unknown error." : String(error)
+            };
+            void (focusedWindow
+                ? electron_1.dialog.showMessageBox(focusedWindow, options)
+                : electron_1.dialog.showMessageBox(options));
+        }
         logError(`Auto update error: ${error == null ? "Unknown error." : String(error)}`);
     });
     electron_updater_1.autoUpdater.on("download-progress", (progress) => {
@@ -732,6 +801,23 @@ function normalizePluginPermissions(permissions) {
 function getUnsafePluginPermissions(plugin) {
     return normalizePluginPermissions(plugin.permissions).filter((permission) => !PLUGIN_PERMISSION_RULES[permission]?.safe);
 }
+function getGrantedPluginPermissions(plugin) {
+    const declaredPermissions = new Set(normalizePluginPermissions(plugin.permissions));
+    const approvedUnsafePermissions = new Set(getApprovedUnsafePermissions(plugin.id));
+    return Array.from(declaredPermissions).filter((permission) => {
+        const rule = PLUGIN_PERMISSION_RULES[permission];
+        if (!rule) {
+            return approvedUnsafePermissions.has(permission);
+        }
+        if (rule.safe) {
+            return true;
+        }
+        return approvedUnsafePermissions.has(permission);
+    });
+}
+function pluginHasPermission(plugin, permission) {
+    return getGrantedPluginPermissions(plugin).includes(permission);
+}
 function formatUnsafePermissionDetails(permissions) {
     return permissions
         .map((permission) => {
@@ -758,6 +844,46 @@ function clearApprovedUnsafePermissions(pluginId) {
     const approvals = { ...(pluginStore.get("approvedUnsafePermissions") || {}) };
     delete approvals[pluginId];
     pluginStore.set("approvedUnsafePermissions", approvals);
+}
+function getPluginDataDirectory(pluginDirectory) {
+    return node_path_1.default.join(pluginDirectory, "data");
+}
+function resolvePluginStoragePath(pluginDirectory, relativePath) {
+    const normalizedPath = String(relativePath || "").trim();
+    if (!normalizedPath) {
+        throw new Error("Storage path is required.");
+    }
+    const dataDirectory = getPluginDataDirectory(pluginDirectory);
+    const targetPath = node_path_1.default.resolve(dataDirectory, normalizedPath);
+    if (!targetPath.startsWith(dataDirectory)) {
+        throw new Error("Storage path must stay inside the plugin data directory.");
+    }
+    return targetPath;
+}
+function isSameOriginLike(requestUrl, allowedUrl) {
+    try {
+        const request = new URL(requestUrl);
+        const allowed = new URL(allowedUrl);
+        return request.hostname === allowed.hostname && request.port === allowed.port;
+    }
+    catch {
+        return false;
+    }
+}
+function isPluginNetworkRequestAllowed(requestUrl, plugin) {
+    const normalizedUrl = requestUrl.toLowerCase();
+    if (normalizedUrl.startsWith("file:") ||
+        normalizedUrl.startsWith("data:") ||
+        normalizedUrl.startsWith("blob:") ||
+        normalizedUrl.startsWith("devtools:")) {
+        return true;
+    }
+    if (isDev && process.env.VITE_DEV_SERVER_URL) {
+        if (isSameOriginLike(requestUrl, process.env.VITE_DEV_SERVER_URL)) {
+            return true;
+        }
+    }
+    return pluginHasPermission(plugin, "network");
 }
 function disablePluginsGlobally() {
     pluginStore.set("pluginsEnabled", false);
@@ -891,40 +1017,56 @@ async function getInstalledPlugins() {
         }))
     };
 }
-async function getPluginById(pluginId) {
+async function findPluginRecordById(pluginId) {
     if (!arePluginsEnabled())
         return null;
     await ensurePluginsDirectory();
-    await ensurePluginRuntimeRootDirectory();
     const pluginsDirectory = getPluginsDirectory();
     const entries = await promises_1.default.readdir(pluginsDirectory, { withFileTypes: true });
     for (const entry of entries) {
         if (!entry.isDirectory())
             continue;
         const pluginRecord = await readPluginRecord(node_path_1.default.join(pluginsDirectory, entry.name));
-        if (!pluginRecord || pluginRecord.manifest.id !== pluginId)
-            continue;
-        const entryPath = node_path_1.default.resolve(pluginRecord.directory, pluginRecord.manifest.entry);
-        if (!entryPath.startsWith(pluginRecord.directory))
-            return null;
-        const script = await promises_1.default.readFile(entryPath, "utf8");
-        let style;
-        const runtimeDirectory = await ensurePluginRuntimeDirectory(pluginRecord.manifest.id);
-        if (typeof pluginRecord.manifest.style === "string") {
-            const stylePath = node_path_1.default.resolve(pluginRecord.directory, pluginRecord.manifest.style);
-            if (stylePath.startsWith(pluginRecord.directory)) {
-                style = await promises_1.default.readFile(stylePath, "utf8");
-            }
+        if (pluginRecord?.manifest.id === pluginId) {
+            return pluginRecord;
         }
-        return {
-            plugin: pluginRecord.manifest,
-            script,
-            style,
-            runtimeDirectory,
-            pluginDirectory: pluginRecord.directory
-        };
     }
     return null;
+}
+async function getPluginById(pluginId) {
+    const pluginRecord = await findPluginRecordById(pluginId);
+    if (!pluginRecord)
+        return null;
+    await ensurePluginRuntimeRootDirectory();
+    const entryPath = node_path_1.default.resolve(pluginRecord.directory, pluginRecord.manifest.entry);
+    if (!entryPath.startsWith(pluginRecord.directory))
+        return null;
+    const script = await promises_1.default.readFile(entryPath, "utf8");
+    let style;
+    const runtimeDirectory = await ensurePluginRuntimeDirectory(pluginRecord.manifest.id);
+    if (typeof pluginRecord.manifest.style === "string") {
+        const stylePath = node_path_1.default.resolve(pluginRecord.directory, pluginRecord.manifest.style);
+        if (stylePath.startsWith(pluginRecord.directory)) {
+            style = await promises_1.default.readFile(stylePath, "utf8");
+        }
+    }
+    return {
+        plugin: pluginRecord.manifest,
+        script,
+        style,
+        runtimeDirectory,
+        pluginDirectory: pluginRecord.directory
+    };
+}
+async function requirePluginPermission(pluginId, permission) {
+    const pluginData = await getPluginById(pluginId);
+    if (!pluginData) {
+        throw new Error("Plugin could not be loaded.");
+    }
+    if (!pluginHasPermission(pluginData.plugin, permission)) {
+        throw new Error(`Plugin permission not granted: ${permission}`);
+    }
+    return pluginData;
 }
 async function deletePlugin(pluginId) {
     const pluginData = await getPluginById(pluginId);
@@ -1136,7 +1278,7 @@ function attachWindowStateSave(key, win) {
 function isUsableWindow(win) {
     return !!win && !win.isDestroyed();
 }
-function createMainWindow() {
+function createMainWindow(startHidden = false) {
     const state = getWindowBounds("main", {
         width: 1200,
         height: 800
@@ -1164,6 +1306,14 @@ function createMainWindow() {
         void mainWindow.loadFile(node_path_1.default.join(__dirname, "../dist/index.html"));
     }
     mainWindow.once("ready-to-show", () => {
+        if (startHidden) {
+            mainWindow?.hide();
+            logInfo("Main window started minimized in tray.");
+            if (process.platform === "darwin" && electron_1.app.dock) {
+                electron_1.app.dock.hide();
+            }
+            return;
+        }
         mainWindow?.show();
         logInfo("Main window is ready.");
     });
@@ -1679,9 +1829,29 @@ async function createPluginWindow(pluginId) {
         autoHideMenuBar: true,
         title: pluginData.plugin.name,
         webPreferences: {
-            preload: node_path_1.default.join(__dirname, "preload.js"),
-            contextIsolation: false,
-            nodeIntegration: true
+            preload: node_path_1.default.join(__dirname, "plugin-preload.js"),
+            contextIsolation: true,
+            nodeIntegration: false,
+            partition: `pxs-plugin-${pluginId}-${Date.now()}`,
+            additionalArguments: [`--pxs-plugin-id=${pluginId}`]
+        }
+    });
+    pluginWindow.webContents.session.webRequest.onBeforeRequest((details, callback) => {
+        callback({ cancel: !isPluginNetworkRequestAllowed(details.url, pluginData.plugin) });
+    });
+    pluginWindow.webContents.setWindowOpenHandler(({ url }) => {
+        if (pluginHasPermission(pluginData.plugin, "external_links")) {
+            void electron_1.shell.openExternal(url);
+        }
+        return { action: "deny" };
+    });
+    pluginWindow.webContents.on("will-navigate", (event, url) => {
+        if (isPluginNetworkRequestAllowed(url, pluginData.plugin)) {
+            return;
+        }
+        event.preventDefault();
+        if (pluginHasPermission(pluginData.plugin, "external_links")) {
+            void electron_1.shell.openExternal(url);
         }
     });
     attachWindowStateSave("plugin", pluginWindow);
@@ -1793,6 +1963,20 @@ function registerIpcHandlers() {
         await electron_1.shell.openExternal(normalizedUrl);
         return { success: true };
     });
+    electron_1.ipcMain.handle("app:check-for-updates", async () => {
+        if (!electron_1.app.isPackaged) {
+            return { success: false, reason: "not-packaged" };
+        }
+        manualUpdateCheckRequested = true;
+        try {
+            await electron_updater_1.autoUpdater.checkForUpdates();
+            return { success: true };
+        }
+        catch (error) {
+            manualUpdateCheckRequested = false;
+            throw error;
+        }
+    });
     electron_1.ipcMain.handle("app:open-logs-directory", async () => {
         await promises_1.default.mkdir(getLogsDirectory(), { recursive: true });
         await electron_1.shell.openPath(getLogsDirectory());
@@ -1832,6 +2016,141 @@ function registerIpcHandlers() {
     });
     electron_1.ipcMain.handle("plugins:require", async (_event, runtimeDirectory, specifier) => {
         const runtimePackagePath = node_path_1.default.join(runtimeDirectory, "package.json");
+        const runtimeRequire = (0, node_module_1.createRequire)(runtimePackagePath);
+        return runtimeRequire(specifier);
+    });
+    electron_1.ipcMain.handle("plugin-host:get-plugin", async (_event, pluginId) => {
+        return getPluginById(pluginId);
+    });
+    electron_1.ipcMain.handle("plugin-host:storage-read-text", async (_event, pluginId, relativePath) => {
+        const pluginData = await requirePluginPermission(pluginId, "storage");
+        const targetPath = resolvePluginStoragePath(pluginData.pluginDirectory, relativePath);
+        return promises_1.default.readFile(targetPath, "utf8");
+    });
+    electron_1.ipcMain.handle("plugin-host:storage-write-text", async (_event, pluginId, relativePath, content) => {
+        const pluginData = await requirePluginPermission(pluginId, "storage");
+        const targetPath = resolvePluginStoragePath(pluginData.pluginDirectory, relativePath);
+        await promises_1.default.mkdir(node_path_1.default.dirname(targetPath), { recursive: true });
+        await promises_1.default.writeFile(targetPath, String(content ?? ""), "utf8");
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("plugin-host:storage-delete", async (_event, pluginId, relativePath) => {
+        const pluginData = await requirePluginPermission(pluginId, "storage");
+        const targetPath = resolvePluginStoragePath(pluginData.pluginDirectory, relativePath);
+        await promises_1.default.rm(targetPath, { recursive: true, force: true });
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("plugin-host:storage-list", async (_event, pluginId) => {
+        const pluginData = await requirePluginPermission(pluginId, "storage");
+        const dataDirectory = getPluginDataDirectory(pluginData.pluginDirectory);
+        await promises_1.default.mkdir(dataDirectory, { recursive: true });
+        return promises_1.default.readdir(dataDirectory);
+    });
+    electron_1.ipcMain.handle("plugin-host:clipboard-read-text", async (_event, pluginId) => {
+        await requirePluginPermission(pluginId, "clipboard");
+        return electron_1.clipboard.readText();
+    });
+    electron_1.ipcMain.handle("plugin-host:clipboard-write-text", async (_event, pluginId, text) => {
+        await requirePluginPermission(pluginId, "clipboard");
+        electron_1.clipboard.writeText(String(text ?? ""));
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("plugin-host:notifications-show", async (_event, pluginId, payload) => {
+        await requirePluginPermission(pluginId, "notifications");
+        new electron_1.Notification({
+            title: String(payload?.title || "Pokenix Studio"),
+            body: String(payload?.body || "")
+        }).show();
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("plugin-host:choose-directory", async (_event, pluginId) => {
+        await requirePluginPermission(pluginId, "filesystem");
+        const result = await electron_1.dialog.showOpenDialog({
+            properties: ["openDirectory"]
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+            return { success: false };
+        }
+        return { success: true, path: result.filePaths[0] };
+    });
+    electron_1.ipcMain.handle("plugin-host:list-directory", async (_event, pluginId, directoryPath) => {
+        await requirePluginPermission(pluginId, "filesystem");
+        const entries = await promises_1.default.readdir(String(directoryPath || ""), { withFileTypes: true });
+        return entries.map((entry) => ({
+            name: entry.name,
+            kind: entry.isDirectory() ? "directory" : "file"
+        }));
+    });
+    electron_1.ipcMain.handle("plugin-host:read-text-file", async (_event, pluginId, targetPath) => {
+        await requirePluginPermission(pluginId, "filesystem");
+        return promises_1.default.readFile(String(targetPath || ""), "utf8");
+    });
+    electron_1.ipcMain.handle("plugin-host:write-text-file", async (_event, pluginId, targetPath, content) => {
+        await requirePluginPermission(pluginId, "filesystem");
+        await promises_1.default.writeFile(String(targetPath || ""), String(content ?? ""), "utf8");
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("plugin-host:delete-path", async (_event, pluginId, targetPath) => {
+        await requirePluginPermission(pluginId, "filesystem");
+        await promises_1.default.rm(String(targetPath || ""), { recursive: true, force: true });
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("plugin-host:open-path", async (_event, pluginId, targetPath) => {
+        await requirePluginPermission(pluginId, "filesystem");
+        await electron_1.shell.openPath(String(targetPath || ""));
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("plugin-host:network-request", async (_event, pluginId, url, init) => {
+        await requirePluginPermission(pluginId, "network");
+        const response = await fetch(String(url || ""), {
+            method: init?.method,
+            headers: init?.headers,
+            body: init?.body
+        });
+        const body = await response.text();
+        return {
+            ok: response.ok,
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries()),
+            body
+        };
+    });
+    electron_1.ipcMain.handle("plugin-host:open-external", async (_event, pluginId, url) => {
+        await requirePluginPermission(pluginId, "external_links");
+        await electron_1.shell.openExternal(String(url || ""));
+        return { success: true };
+    });
+    electron_1.ipcMain.handle("plugin-host:process-run", async (_event, pluginId, command, args) => {
+        await requirePluginPermission(pluginId, "process");
+        return new Promise((resolve, reject) => {
+            const child = (0, node_child_process_1.spawn)(String(command || ""), Array.isArray(args) ? args : [], {
+                shell: false
+            });
+            let stdout = "";
+            let stderr = "";
+            child.stdout.on("data", (chunk) => {
+                stdout += chunk.toString();
+            });
+            child.stderr.on("data", (chunk) => {
+                stderr += chunk.toString();
+            });
+            child.on("error", (error) => {
+                reject(error);
+            });
+            child.on("close", (code) => {
+                resolve({
+                    success: code === 0,
+                    code,
+                    stdout: stdout.trim(),
+                    stderr: stderr.trim()
+                });
+            });
+        });
+    });
+    electron_1.ipcMain.handle("plugin-host:require", async (_event, pluginId, specifier) => {
+        const pluginData = await requirePluginPermission(pluginId, "native_modules");
+        const runtimePackagePath = node_path_1.default.join(pluginData.runtimeDirectory, "package.json");
         const runtimeRequire = (0, node_module_1.createRequire)(runtimePackagePath);
         return runtimeRequire(specifier);
     });
@@ -1886,15 +2205,16 @@ function registerIpcHandlers() {
     });
     electron_1.ipcMain.handle("settings:set", (_event, key, value) => {
         try {
-            settingsStore.set(key, value);
+            if (key === "startWithSystem" && !value) {
+                settingsStore.set("startWithSystem", false);
+                settingsStore.set("startMinimized", false);
+            }
+            else {
+                settingsStore.set(key, value);
+            }
             logInfo(`Setting updated: ${key}=${String(value)}`);
-            if (key === "startWithSystem" && !isDev) {
-                try {
-                    electron_1.app.setLoginItemSettings({
-                        openAtLogin: value
-                    });
-                }
-                catch { }
+            if (key === "startWithSystem" || key === "startMinimized") {
+                updateLoginItemSettings();
             }
             return {
                 success: true,
@@ -1918,18 +2238,12 @@ function registerIpcHandlers() {
     electron_1.ipcMain.handle("settings:reset", () => {
         try {
             settingsStore.set("startWithSystem", defaultSettings.startWithSystem);
+            settingsStore.set("startMinimized", defaultSettings.startMinimized);
             settingsStore.set("closeToTray", defaultSettings.closeToTray);
             settingsStore.set("darkTheme", defaultSettings.darkTheme);
             settingsStore.set("openNewTabs", defaultSettings.openNewTabs);
             settingsStore.set("developerMode", defaultSettings.developerMode);
-            if (!isDev) {
-                try {
-                    electron_1.app.setLoginItemSettings({
-                        openAtLogin: defaultSettings.startWithSystem
-                    });
-                }
-                catch { }
-            }
+            updateLoginItemSettings();
             return {
                 success: true,
                 settings: getSettings(),
@@ -2617,22 +2931,15 @@ electron_1.app.whenReady().then(async () => {
     registerIpcHandlers();
     configureAutoUpdater();
     createApplicationMenu();
-    createMainWindow();
     createTray();
+    createMainWindow(shouldStartMinimizedOnLaunch());
     if (pluginStore.get("pluginsEnabled")) {
         void ensurePluginNodeRuntimeInstalled(mainWindow?.webContents ?? null).catch((error) => {
             console.error("Failed to update plugin runtime:", error);
             logError(`Failed to update plugin runtime: ${error instanceof Error ? error.message : "Unknown error."}`);
         });
     }
-    if (!isDev) {
-        try {
-            electron_1.app.setLoginItemSettings({
-                openAtLogin: settingsStore.get("startWithSystem")
-            });
-        }
-        catch { }
-    }
+    updateLoginItemSettings();
     if (electron_1.app.isPackaged) {
         void electron_updater_1.autoUpdater.checkForUpdatesAndNotify().catch((error) => {
             logError(`Failed to check for updates: ${error instanceof Error ? error.message : "Unknown error."}`);

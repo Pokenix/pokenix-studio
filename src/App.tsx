@@ -6,6 +6,7 @@ type Page = "home" | "plugins" | "themes" | "hub" | "settings" | "console"
 
 type AppSettings = {
   startWithSystem: boolean
+  startMinimized: boolean
   closeToTray: boolean
   darkTheme: boolean
   openNewTabs: boolean
@@ -121,6 +122,14 @@ type RgbColor = {
   b: number
 }
 
+type EyeDropperResult = {
+  sRGBHex: string
+}
+
+type EyeDropperConstructor = new () => {
+  open: () => Promise<EyeDropperResult>
+}
+
 type TodoItem = {
   id: string
   text: string
@@ -135,7 +144,13 @@ declare global {
       settings: {
         get: () => Promise<AppSettings>
         set: (
-          key: "startWithSystem" | "closeToTray" | "darkTheme" | "openNewTabs" | "developerMode",
+          key:
+            | "startWithSystem"
+            | "startMinimized"
+            | "closeToTray"
+            | "darkTheme"
+            | "openNewTabs"
+            | "developerMode",
           value: boolean
         ) => Promise<SettingsSetResponse>
         path: () => Promise<string>
@@ -181,6 +196,7 @@ declare global {
         version: () => Promise<string>
         openWebsite: () => Promise<{ success: boolean }>
         openExternalUrl: (url: string) => Promise<{ success: boolean }>
+        checkForUpdates: () => Promise<{ success: boolean; reason?: "not-packaged" }>
         openLogsDirectory: () => Promise<{ success: boolean }>
         onNavigate: (callback: (page: Page) => void) => () => void
       }
@@ -230,6 +246,57 @@ declare global {
         saveFileAs: (content: string, currentPath: string) => Promise<NotepadSaveResponse>
         setDirtyState: (dirty: boolean) => void
         onSaveAllRequest: (callback: () => Promise<boolean> | boolean) => () => void
+      }
+    }
+    pluginHost: {
+      pluginId: string
+      getPlugin: () => Promise<PluginContentResponse>
+      storage: {
+        readText: (relativePath: string) => Promise<string>
+        writeText: (relativePath: string, content: string) => Promise<{ success: boolean }>
+        delete: (relativePath: string) => Promise<{ success: boolean }>
+        list: () => Promise<string[]>
+      }
+      clipboard: {
+        readText: () => Promise<string>
+        writeText: (text: string) => Promise<{ success: boolean }>
+      }
+      notifications: {
+        show: (title: string, body?: string) => Promise<{ success: boolean }>
+      }
+      filesystem: {
+        chooseDirectory: () => Promise<{ success: boolean; path?: string }>
+        listDirectory: (directoryPath: string) => Promise<{ name: string; kind: "file" | "directory" }[]>
+        readTextFile: (targetPath: string) => Promise<string>
+        writeTextFile: (targetPath: string, content: string) => Promise<{ success: boolean }>
+        deletePath: (targetPath: string) => Promise<{ success: boolean }>
+        openPath: (targetPath: string) => Promise<{ success: boolean }>
+      }
+      network: {
+        request: (
+          url: string,
+          init?: { method?: string; headers?: Record<string, string>; body?: string }
+        ) => Promise<{
+          ok: boolean
+          status: number
+          statusText: string
+          headers: Record<string, string>
+          body: string
+        }>
+      }
+      external: {
+        open: (url: string) => Promise<{ success: boolean }>
+      }
+      process: {
+        run: (command: string, args?: string[]) => Promise<{
+          success: boolean
+          code: number | null
+          stdout: string
+          stderr: string
+        }>
+      }
+      nativeModules: {
+        require: (specifier: string) => Promise<unknown>
       }
     }
   }
@@ -453,7 +520,13 @@ function SettingsPage({
 }: {
   settings: AppSettings
   updateSetting: (
-    key: "startWithSystem" | "closeToTray" | "darkTheme" | "openNewTabs" | "developerMode",
+    key:
+      | "startWithSystem"
+      | "startMinimized"
+      | "closeToTray"
+      | "darkTheme"
+      | "openNewTabs"
+      | "developerMode",
     value: boolean
   ) => Promise<void>
   resetSettings: () => Promise<void>
@@ -476,6 +549,16 @@ function SettingsPage({
             type="checkbox"
             checked={settings.startWithSystem}
             onChange={(e) => void updateSetting("startWithSystem", e.target.checked)}
+          />
+        </label>
+
+        <label className="settings-item">
+          <span>Start minimized</span>
+          <input
+            type="checkbox"
+            checked={settings.startMinimized}
+            disabled={!settings.startWithSystem}
+            onChange={(e) => void updateSetting("startMinimized", e.target.checked)}
           />
         </label>
 
@@ -579,6 +662,19 @@ function SettingsPage({
           Config path: {settingsPath || "Loading..."}
         </p>
         <div className="settings-action-row">
+          <button
+            className="notepad-action-btn"
+            onClick={async () => {
+              const result = await window.hubAPI.app.checkForUpdates()
+
+              if (!result.success && result.reason === "not-packaged") {
+                window.alert("Check for updates is only available in the packaged app.")
+              }
+            }}
+            type="button"
+          >
+            Check for Updates
+          </button>
           <button
             className="notepad-action-btn"
             onClick={() => {
@@ -1170,6 +1266,23 @@ function UtilityToolsPage() {
     setHslS(String(hsl.s))
     setHslL(String(hsl.l))
     setColorMessage("")
+  }
+
+  const openColorPicker = async () => {
+    const eyeDropper = (window as Window & { EyeDropper?: EyeDropperConstructor }).EyeDropper
+
+    if (typeof eyeDropper === "function") {
+      try {
+        const picker = new eyeDropper()
+        const result = await picker.open()
+        syncHexValue(result.sRGBHex)
+        return
+      } catch {
+        return
+      }
+    }
+
+    colorPickerRef.current?.click()
   }
 
   const tryAddDirectory = async () => {
@@ -1909,13 +2022,15 @@ function UtilityToolsPage() {
               <div
                 className="color-preview-swatch"
                 style={{ background: `rgb(${previewRgb.r}, ${previewRgb.g}, ${previewRgb.b})` }}
-                onClick={() => colorPickerRef.current?.click()}
+                onClick={() => {
+                  void openColorPicker()
+                }}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault()
-                    colorPickerRef.current?.click()
+                    void openColorPicker()
                   }
                 }}
               />
@@ -2138,8 +2253,9 @@ function ConsolePage({
         createLine(`$ ${nextCommand}`, { kind: "command" }),
         createLine("Usage: update [module]"),
         createLine("Available modules:"),
+        createLine("app"),
         createLine("runtime"),
-        createLine("Example: update runtime")
+        createLine("Examples: update app, update runtime")
       ])
       return
     }
@@ -2211,6 +2327,32 @@ function ConsolePage({
       setLines((current) => [
         ...current,
         createLine(`Plugin runtime updated to ${result.version || "target version"}.`)
+      ])
+      return
+    }
+
+    if (nextCommand === "update app") {
+      setLines((current) => [
+        ...current,
+        createLine(`$ ${nextCommand}`, { kind: "command" }),
+        createLine("Checking for app updates...")
+      ])
+
+      const result = await window.hubAPI.app.checkForUpdates()
+
+      if (!result.success && result.reason === "not-packaged") {
+        setLines((current) => [
+          ...current.slice(0, -1),
+          createLine("This command is only available in the packaged app.", {
+            tone: "error"
+          })
+        ])
+        return
+      }
+
+      setLines((current) => [
+        ...current,
+        createLine("Update check started.")
       ])
       return
     }
@@ -3322,12 +3464,16 @@ function PluginRuntimePage({ pluginId }: { pluginId: string }) {
     let cancelled = false
     let cleanup: (() => void) | undefined
     let styleElement: HTMLStyleElement | undefined
+    let pluginModuleUrl: string | undefined
+    const pluginGlobal = globalThis as typeof globalThis & {
+      __pxsPluginRequire?: (specifier: string) => Promise<unknown>
+    }
 
     const loadPlugin = async () => {
       setPluginError("")
       host.innerHTML = ""
 
-      const pluginData = await window.hubAPI.plugins.get(pluginId)
+      const pluginData = await window.pluginHost.getPlugin()
 
       if (!pluginData) {
         setPluginError("Plugin could not be loaded.")
@@ -3343,27 +3489,28 @@ function PluginRuntimePage({ pluginId }: { pluginId: string }) {
           document.head.appendChild(styleElement)
         }
 
-        const pluginFactory = new Function(
-          "require",
-          pluginData.script.replace(/^\s*export\s+default\s+/, "return ")
-        ) as (require: (specifier: string) => unknown) => {
-          mount?: (container: HTMLDivElement, api: object) => unknown
-          unmount?: () => void
+        pluginGlobal.__pxsPluginRequire = (specifier: string) =>
+          window.pluginHost.nativeModules.require(specifier)
+
+        pluginModuleUrl = URL.createObjectURL(
+          new Blob(
+            [
+              "const require = (specifier) => globalThis.__pxsPluginRequire?.(specifier);\n",
+              pluginData.script
+            ],
+            { type: "text/javascript" }
+          )
+        )
+
+        const pluginModule = (await import(/* @vite-ignore */ pluginModuleUrl)) as {
+          default?: {
+            mount?: (container: HTMLDivElement, api: object) => unknown
+            unmount?: () => void
+          }
         }
-        const pluginRequire =
-          typeof window.require === "function"
-            ? (() => {
-                const nodeModule = window.require?.("node:module") as typeof import("node:module")
-                const nodePath = window.require?.("node:path") as typeof import("node:path")
-                const runtimeRequire = nodeModule.createRequire(
-                  nodePath.join(pluginData.runtimeDirectory, "package.json")
-                )
 
-                return (specifier: string) => runtimeRequire(specifier)
-              })()
-            : (specifier: string) => window.hubAPI.plugins.require(pluginData.runtimeDirectory, specifier)
+        const pluginInstance = pluginModule.default
 
-        const pluginInstance = pluginFactory(pluginRequire)
         if (cancelled) return
 
         if (!pluginInstance || typeof pluginInstance.mount !== "function") {
@@ -3371,9 +3518,20 @@ function PluginRuntimePage({ pluginId }: { pluginId: string }) {
           return
         }
 
-        const result = await pluginInstance.mount(host, {
-          pluginDirectory: pluginData.pluginDirectory
-        })
+        const pluginAPI = {
+          pluginId: pluginData.plugin.id,
+          pluginDirectory: pluginData.pluginDirectory,
+          permissions: pluginData.plugin.permissions || [],
+          storage: window.pluginHost.storage,
+          clipboard: window.pluginHost.clipboard,
+          notifications: window.pluginHost.notifications,
+          filesystem: window.pluginHost.filesystem,
+          network: window.pluginHost.network,
+          external: window.pluginHost.external,
+          process: window.pluginHost.process
+        }
+
+        const result = await pluginInstance.mount(host, pluginAPI)
         const unmount = pluginInstance.unmount
 
         if (typeof result === "function") {
@@ -3392,6 +3550,8 @@ function PluginRuntimePage({ pluginId }: { pluginId: string }) {
             ? `Plugin crashed: ${error.message}`
             : "Plugin crashed while loading."
         )
+      } finally {
+        delete pluginGlobal.__pxsPluginRequire
       }
     }
 
@@ -3402,6 +3562,8 @@ function PluginRuntimePage({ pluginId }: { pluginId: string }) {
       host.innerHTML = ""
       cleanup?.()
       if (styleElement) styleElement.remove()
+      if (pluginModuleUrl) URL.revokeObjectURL(pluginModuleUrl)
+      delete pluginGlobal.__pxsPluginRequire
     }
   }, [pluginId])
 
@@ -3454,6 +3616,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("home")
   const [settings, setSettings] = useState<AppSettings>({
     startWithSystem: false,
+    startMinimized: false,
     closeToTray: true,
     darkTheme: true,
     openNewTabs: true,
@@ -3567,7 +3730,13 @@ export default function App() {
   }, [])
 
   const updateSetting = async (
-    key: "startWithSystem" | "closeToTray" | "darkTheme" | "openNewTabs" | "developerMode",
+    key:
+      | "startWithSystem"
+      | "startMinimized"
+      | "closeToTray"
+      | "darkTheme"
+      | "openNewTabs"
+      | "developerMode",
     value: boolean
   ) => {
     const r = await window.hubAPI.settings.set(key, value)

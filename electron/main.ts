@@ -7,7 +7,9 @@ import {
   nativeImage,
   ipcMain,
   dialog,
-  WebContents
+  WebContents,
+  Notification,
+  clipboard
 } from "electron"
 import path from "node:path"
 import { constants, watch as fsWatch, type FSWatcher } from "node:fs"
@@ -16,7 +18,6 @@ import { createRequire } from "node:module"
 import { spawn } from "node:child_process"
 import https from "node:https"
 import { autoUpdater } from "electron-updater"
-import log from "electron-log"
 import { PLUGIN_NODE_VERSION } from "./runtime-config"
 
 app.setName("Pokenix Studio")
@@ -25,6 +26,7 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
 let updateProgressWindow: BrowserWindow | null = null
+let manualUpdateCheckRequested = false
 
 const moduleWindows = new Map<string, BrowserWindow>()
 const utilityWatchers = new Map<
@@ -43,6 +45,7 @@ const LOG_FILE_MAX_SIZE = 15 * 1024 * 1024
 
 type SettingsStore = {
   startWithSystem: boolean
+  startMinimized: boolean
   closeToTray: boolean
   darkTheme: boolean
   openNewTabs: boolean
@@ -168,6 +171,7 @@ type PluginSetupProgress = {
 
 const defaultSettings: SettingsStore = {
   startWithSystem: false,
+  startMinimized: false,
   closeToTray: true,
   darkTheme: true,
   openNewTabs: true,
@@ -301,10 +305,34 @@ async function initStores() {
 function getSettings(): SettingsStore {
   return {
     startWithSystem: settingsStore.get("startWithSystem"),
+    startMinimized: settingsStore.get("startMinimized"),
     closeToTray: settingsStore.get("closeToTray"),
     darkTheme: settingsStore.get("darkTheme"),
     openNewTabs: settingsStore.get("openNewTabs"),
     developerMode: settingsStore.get("developerMode")
+  }
+}
+
+function updateLoginItemSettings() {
+  if (isDev) return
+
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: settingsStore.get("startWithSystem"),
+      openAsHidden: settingsStore.get("startWithSystem") && settingsStore.get("startMinimized")
+    })
+  } catch {}
+}
+
+function shouldStartMinimizedOnLaunch() {
+  if (isDev) return false
+  if (!settingsStore.get("startWithSystem")) return false
+  if (!settingsStore.get("startMinimized")) return false
+
+  try {
+    return Boolean(app.getLoginItemSettings().wasOpenedAtLogin)
+  } catch {
+    return false
   }
 }
 
@@ -385,6 +413,18 @@ function logWarn(message: string) {
 
 function logError(message: string) {
   void writeLog("ERROR", message)
+}
+
+const updaterLogger = {
+  info(message: string) {
+    logInfo(message)
+  },
+  warn(message: string) {
+    logWarn(message)
+  },
+  error(message: string) {
+    logError(message)
+  }
 }
 
 function getFocusedAppWindow() {
@@ -525,7 +565,7 @@ function closeUpdateProgressWindow() {
 }
 
 function configureAutoUpdater() {
-  autoUpdater.logger = log
+  autoUpdater.logger = updaterLogger
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
@@ -535,6 +575,7 @@ function configureAutoUpdater() {
 
   autoUpdater.on("update-available", async (info) => {
     logInfo(`Update available: ${info.version}.`)
+    manualUpdateCheckRequested = false
 
     const focusedWindow = getFocusedAppWindow()
 
@@ -570,10 +611,43 @@ function configureAutoUpdater() {
 
   autoUpdater.on("update-not-available", (info) => {
     logInfo(`No update available. Current latest version: ${info.version}.`)
+
+    if (manualUpdateCheckRequested) {
+      manualUpdateCheckRequested = false
+      const focusedWindow = getFocusedAppWindow()
+      const options = {
+        type: "info" as const,
+        buttons: ["OK"],
+        defaultId: 0,
+        title: "No Updates Found",
+        message: `Pokenix Studio ${app.getVersion()} is up to date.`,
+        detail: `Latest available version: ${info.version}`
+      }
+
+      void (focusedWindow
+        ? dialog.showMessageBox(focusedWindow, options)
+        : dialog.showMessageBox(options))
+    }
   })
 
   autoUpdater.on("error", (error) => {
     closeUpdateProgressWindow()
+    if (manualUpdateCheckRequested) {
+      manualUpdateCheckRequested = false
+      const focusedWindow = getFocusedAppWindow()
+      const options = {
+        type: "error" as const,
+        buttons: ["OK"],
+        defaultId: 0,
+        title: "Update Check Failed",
+        message: "Pokenix Studio could not check for updates.",
+        detail: error == null ? "Unknown error." : String(error)
+      }
+
+      void (focusedWindow
+        ? dialog.showMessageBox(focusedWindow, options)
+        : dialog.showMessageBox(options))
+    }
     logError(`Auto update error: ${error == null ? "Unknown error." : String(error)}`)
   })
 
@@ -975,6 +1049,28 @@ function getUnsafePluginPermissions(plugin: PluginManifest) {
   )
 }
 
+function getGrantedPluginPermissions(plugin: PluginManifest) {
+  const declaredPermissions = new Set(normalizePluginPermissions(plugin.permissions))
+  const approvedUnsafePermissions = new Set(getApprovedUnsafePermissions(plugin.id))
+
+  return Array.from(declaredPermissions).filter((permission) => {
+    const rule = PLUGIN_PERMISSION_RULES[permission]
+    if (!rule) {
+      return approvedUnsafePermissions.has(permission)
+    }
+
+    if (rule.safe) {
+      return true
+    }
+
+    return approvedUnsafePermissions.has(permission)
+  })
+}
+
+function pluginHasPermission(plugin: PluginManifest, permission: string) {
+  return getGrantedPluginPermissions(plugin).includes(permission)
+}
+
 function formatUnsafePermissionDetails(permissions: string[]) {
   return permissions
     .map((permission) => {
@@ -1005,6 +1101,58 @@ function clearApprovedUnsafePermissions(pluginId: string) {
   const approvals = { ...(pluginStore.get("approvedUnsafePermissions") || {}) }
   delete approvals[pluginId]
   pluginStore.set("approvedUnsafePermissions", approvals)
+}
+
+function getPluginDataDirectory(pluginDirectory: string) {
+  return path.join(pluginDirectory, "data")
+}
+
+function resolvePluginStoragePath(pluginDirectory: string, relativePath: string) {
+  const normalizedPath = String(relativePath || "").trim()
+
+  if (!normalizedPath) {
+    throw new Error("Storage path is required.")
+  }
+
+  const dataDirectory = getPluginDataDirectory(pluginDirectory)
+  const targetPath = path.resolve(dataDirectory, normalizedPath)
+
+  if (!targetPath.startsWith(dataDirectory)) {
+    throw new Error("Storage path must stay inside the plugin data directory.")
+  }
+
+  return targetPath
+}
+
+function isSameOriginLike(requestUrl: string, allowedUrl: string) {
+  try {
+    const request = new URL(requestUrl)
+    const allowed = new URL(allowedUrl)
+    return request.hostname === allowed.hostname && request.port === allowed.port
+  } catch {
+    return false
+  }
+}
+
+function isPluginNetworkRequestAllowed(requestUrl: string, plugin: PluginManifest) {
+  const normalizedUrl = requestUrl.toLowerCase()
+
+  if (
+    normalizedUrl.startsWith("file:") ||
+    normalizedUrl.startsWith("data:") ||
+    normalizedUrl.startsWith("blob:") ||
+    normalizedUrl.startsWith("devtools:")
+  ) {
+    return true
+  }
+
+  if (isDev && process.env.VITE_DEV_SERVER_URL) {
+    if (isSameOriginLike(requestUrl, process.env.VITE_DEV_SERVER_URL)) {
+      return true
+    }
+  }
+
+  return pluginHasPermission(plugin, "network")
 }
 
 function disablePluginsGlobally() {
@@ -1169,12 +1317,10 @@ async function getInstalledPlugins() {
   }
 }
 
-async function getPluginById(pluginId: string) {
+async function findPluginRecordById(pluginId: string) {
   if (!arePluginsEnabled()) return null
 
   await ensurePluginsDirectory()
-  await ensurePluginRuntimeRootDirectory()
-
   const pluginsDirectory = getPluginsDirectory()
   const entries = await fs.readdir(pluginsDirectory, { withFileTypes: true })
 
@@ -1182,34 +1328,57 @@ async function getPluginById(pluginId: string) {
     if (!entry.isDirectory()) continue
 
     const pluginRecord = await readPluginRecord(path.join(pluginsDirectory, entry.name))
-    if (!pluginRecord || pluginRecord.manifest.id !== pluginId) continue
-
-    const entryPath = path.resolve(pluginRecord.directory, pluginRecord.manifest.entry)
-    if (!entryPath.startsWith(pluginRecord.directory)) return null
-
-    const script = await fs.readFile(entryPath, "utf8")
-
-    let style: string | undefined
-    const runtimeDirectory = await ensurePluginRuntimeDirectory(pluginRecord.manifest.id)
-
-    if (typeof pluginRecord.manifest.style === "string") {
-      const stylePath = path.resolve(pluginRecord.directory, pluginRecord.manifest.style)
-
-      if (stylePath.startsWith(pluginRecord.directory)) {
-        style = await fs.readFile(stylePath, "utf8")
-      }
-    }
-
-    return {
-      plugin: pluginRecord.manifest,
-      script,
-      style,
-      runtimeDirectory,
-      pluginDirectory: pluginRecord.directory
+    if (pluginRecord?.manifest.id === pluginId) {
+      return pluginRecord
     }
   }
 
   return null
+}
+
+async function getPluginById(pluginId: string) {
+  const pluginRecord = await findPluginRecordById(pluginId)
+  if (!pluginRecord) return null
+
+  await ensurePluginRuntimeRootDirectory()
+
+  const entryPath = path.resolve(pluginRecord.directory, pluginRecord.manifest.entry)
+  if (!entryPath.startsWith(pluginRecord.directory)) return null
+
+  const script = await fs.readFile(entryPath, "utf8")
+
+  let style: string | undefined
+  const runtimeDirectory = await ensurePluginRuntimeDirectory(pluginRecord.manifest.id)
+
+  if (typeof pluginRecord.manifest.style === "string") {
+    const stylePath = path.resolve(pluginRecord.directory, pluginRecord.manifest.style)
+
+    if (stylePath.startsWith(pluginRecord.directory)) {
+      style = await fs.readFile(stylePath, "utf8")
+    }
+  }
+
+  return {
+    plugin: pluginRecord.manifest,
+    script,
+    style,
+    runtimeDirectory,
+    pluginDirectory: pluginRecord.directory
+  }
+}
+
+async function requirePluginPermission(pluginId: string, permission: string) {
+  const pluginData = await getPluginById(pluginId)
+
+  if (!pluginData) {
+    throw new Error("Plugin could not be loaded.")
+  }
+
+  if (!pluginHasPermission(pluginData.plugin, permission)) {
+    throw new Error(`Plugin permission not granted: ${permission}`)
+  }
+
+  return pluginData
 }
 
 async function deletePlugin(pluginId: string) {
@@ -1469,7 +1638,7 @@ function isUsableWindow(win: BrowserWindow | null): win is BrowserWindow {
   return !!win && !win.isDestroyed()
 }
 
-function createMainWindow() {
+function createMainWindow(startHidden = false) {
   const state = getWindowBounds("main", {
     width: 1200,
     height: 800
@@ -1500,6 +1669,16 @@ function createMainWindow() {
   }
 
   mainWindow.once("ready-to-show", () => {
+    if (startHidden) {
+      mainWindow?.hide()
+      logInfo("Main window started minimized in tray.")
+
+      if (process.platform === "darwin" && app.dock) {
+        app.dock.hide()
+      }
+      return
+    }
+
     mainWindow?.show()
     logInfo("Main window is ready.")
   })
@@ -2130,9 +2309,35 @@ async function createPluginWindow(pluginId: string) {
     autoHideMenuBar: true,
     title: pluginData.plugin.name,
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: false,
-      nodeIntegration: true
+      preload: path.join(__dirname, "plugin-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      partition: `pxs-plugin-${pluginId}-${Date.now()}`,
+      additionalArguments: [`--pxs-plugin-id=${pluginId}`]
+    }
+  })
+
+  pluginWindow.webContents.session.webRequest.onBeforeRequest((details, callback) => {
+    callback({ cancel: !isPluginNetworkRequestAllowed(details.url, pluginData.plugin) })
+  })
+
+  pluginWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (pluginHasPermission(pluginData.plugin, "external_links")) {
+      void shell.openExternal(url)
+    }
+
+    return { action: "deny" }
+  })
+
+  pluginWindow.webContents.on("will-navigate", (event, url) => {
+    if (isPluginNetworkRequestAllowed(url, pluginData.plugin)) {
+      return
+    }
+
+    event.preventDefault()
+
+    if (pluginHasPermission(pluginData.plugin, "external_links")) {
+      void shell.openExternal(url)
     }
   })
 
@@ -2278,6 +2483,22 @@ function registerIpcHandlers() {
     return { success: true }
   })
 
+  ipcMain.handle("app:check-for-updates", async () => {
+    if (!app.isPackaged) {
+      return { success: false, reason: "not-packaged" as const }
+    }
+
+    manualUpdateCheckRequested = true
+
+    try {
+      await autoUpdater.checkForUpdates()
+      return { success: true }
+    } catch (error) {
+      manualUpdateCheckRequested = false
+      throw error
+    }
+  })
+
   ipcMain.handle("app:open-logs-directory", async () => {
     await fs.mkdir(getLogsDirectory(), { recursive: true })
     await shell.openPath(getLogsDirectory())
@@ -2325,6 +2546,192 @@ function registerIpcHandlers() {
 
   ipcMain.handle("plugins:require", async (_event, runtimeDirectory: string, specifier: string) => {
     const runtimePackagePath = path.join(runtimeDirectory, "package.json")
+    const runtimeRequire = createRequire(runtimePackagePath)
+    return runtimeRequire(specifier)
+  })
+
+  ipcMain.handle("plugin-host:get-plugin", async (_event, pluginId: string) => {
+    return getPluginById(pluginId)
+  })
+
+  ipcMain.handle("plugin-host:storage-read-text", async (_event, pluginId: string, relativePath: string) => {
+    const pluginData = await requirePluginPermission(pluginId, "storage")
+    const targetPath = resolvePluginStoragePath(pluginData.pluginDirectory, relativePath)
+    return fs.readFile(targetPath, "utf8")
+  })
+
+  ipcMain.handle(
+    "plugin-host:storage-write-text",
+    async (_event, pluginId: string, relativePath: string, content: string) => {
+      const pluginData = await requirePluginPermission(pluginId, "storage")
+      const targetPath = resolvePluginStoragePath(pluginData.pluginDirectory, relativePath)
+      await fs.mkdir(path.dirname(targetPath), { recursive: true })
+      await fs.writeFile(targetPath, String(content ?? ""), "utf8")
+      return { success: true }
+    }
+  )
+
+  ipcMain.handle("plugin-host:storage-delete", async (_event, pluginId: string, relativePath: string) => {
+    const pluginData = await requirePluginPermission(pluginId, "storage")
+    const targetPath = resolvePluginStoragePath(pluginData.pluginDirectory, relativePath)
+    await fs.rm(targetPath, { recursive: true, force: true })
+    return { success: true }
+  })
+
+  ipcMain.handle("plugin-host:storage-list", async (_event, pluginId: string) => {
+    const pluginData = await requirePluginPermission(pluginId, "storage")
+    const dataDirectory = getPluginDataDirectory(pluginData.pluginDirectory)
+    await fs.mkdir(dataDirectory, { recursive: true })
+    return fs.readdir(dataDirectory)
+  })
+
+  ipcMain.handle("plugin-host:clipboard-read-text", async (_event, pluginId: string) => {
+    await requirePluginPermission(pluginId, "clipboard")
+    return clipboard.readText()
+  })
+
+  ipcMain.handle("plugin-host:clipboard-write-text", async (_event, pluginId: string, text: string) => {
+    await requirePluginPermission(pluginId, "clipboard")
+    clipboard.writeText(String(text ?? ""))
+    return { success: true }
+  })
+
+  ipcMain.handle(
+    "plugin-host:notifications-show",
+    async (_event, pluginId: string, payload: { title: string; body?: string }) => {
+      await requirePluginPermission(pluginId, "notifications")
+      new Notification({
+        title: String(payload?.title || "Pokenix Studio"),
+        body: String(payload?.body || "")
+      }).show()
+      return { success: true }
+    }
+  )
+
+  ipcMain.handle("plugin-host:choose-directory", async (_event, pluginId: string) => {
+    await requirePluginPermission(pluginId, "filesystem")
+    const result = await dialog.showOpenDialog({
+      properties: ["openDirectory"]
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false }
+    }
+
+    return { success: true, path: result.filePaths[0] }
+  })
+
+  ipcMain.handle("plugin-host:list-directory", async (_event, pluginId: string, directoryPath: string) => {
+    await requirePluginPermission(pluginId, "filesystem")
+    const entries = await fs.readdir(String(directoryPath || ""), { withFileTypes: true })
+    return entries.map((entry) => ({
+      name: entry.name,
+      kind: entry.isDirectory() ? "directory" : "file"
+    }))
+  })
+
+  ipcMain.handle("plugin-host:read-text-file", async (_event, pluginId: string, targetPath: string) => {
+    await requirePluginPermission(pluginId, "filesystem")
+    return fs.readFile(String(targetPath || ""), "utf8")
+  })
+
+  ipcMain.handle(
+    "plugin-host:write-text-file",
+    async (_event, pluginId: string, targetPath: string, content: string) => {
+      await requirePluginPermission(pluginId, "filesystem")
+      await fs.writeFile(String(targetPath || ""), String(content ?? ""), "utf8")
+      return { success: true }
+    }
+  )
+
+  ipcMain.handle("plugin-host:delete-path", async (_event, pluginId: string, targetPath: string) => {
+    await requirePluginPermission(pluginId, "filesystem")
+    await fs.rm(String(targetPath || ""), { recursive: true, force: true })
+    return { success: true }
+  })
+
+  ipcMain.handle("plugin-host:open-path", async (_event, pluginId: string, targetPath: string) => {
+    await requirePluginPermission(pluginId, "filesystem")
+    await shell.openPath(String(targetPath || ""))
+    return { success: true }
+  })
+
+  ipcMain.handle(
+    "plugin-host:network-request",
+    async (
+      _event,
+      pluginId: string,
+      url: string,
+      init?: { method?: string; headers?: Record<string, string>; body?: string }
+    ) => {
+      await requirePluginPermission(pluginId, "network")
+      const response = await fetch(String(url || ""), {
+        method: init?.method,
+        headers: init?.headers,
+        body: init?.body
+      })
+      const body = await response.text()
+      return {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        body
+      }
+    }
+  )
+
+  ipcMain.handle("plugin-host:open-external", async (_event, pluginId: string, url: string) => {
+    await requirePluginPermission(pluginId, "external_links")
+    await shell.openExternal(String(url || ""))
+    return { success: true }
+  })
+
+  ipcMain.handle(
+    "plugin-host:process-run",
+    async (_event, pluginId: string, command: string, args?: string[]) => {
+      await requirePluginPermission(pluginId, "process")
+
+      return new Promise<{
+        success: boolean
+        code: number | null
+        stdout: string
+        stderr: string
+      }>((resolve, reject) => {
+        const child = spawn(String(command || ""), Array.isArray(args) ? args : [], {
+          shell: false
+        })
+
+        let stdout = ""
+        let stderr = ""
+
+        child.stdout.on("data", (chunk) => {
+          stdout += chunk.toString()
+        })
+
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk.toString()
+        })
+
+        child.on("error", (error) => {
+          reject(error)
+        })
+
+        child.on("close", (code) => {
+          resolve({
+            success: code === 0,
+            code,
+            stdout: stdout.trim(),
+            stderr: stderr.trim()
+          })
+        })
+      })
+    }
+  )
+
+  ipcMain.handle("plugin-host:require", async (_event, pluginId: string, specifier: string) => {
+    const pluginData = await requirePluginPermission(pluginId, "native_modules")
+    const runtimePackagePath = path.join(pluginData.runtimeDirectory, "package.json")
     const runtimeRequire = createRequire(runtimePackagePath)
     return runtimeRequire(specifier)
   })
@@ -2396,15 +2803,16 @@ function registerIpcHandlers() {
     "settings:set",
     (_event, key: keyof SettingsStore, value: boolean) => {
       try {
-        settingsStore.set(key, value)
+        if (key === "startWithSystem" && !value) {
+          settingsStore.set("startWithSystem", false)
+          settingsStore.set("startMinimized", false)
+        } else {
+          settingsStore.set(key, value)
+        }
         logInfo(`Setting updated: ${key}=${String(value)}`)
 
-        if (key === "startWithSystem" && !isDev) {
-          try {
-            app.setLoginItemSettings({
-              openAtLogin: value
-            })
-          } catch {}
+        if (key === "startWithSystem" || key === "startMinimized") {
+          updateLoginItemSettings()
         }
 
         return {
@@ -2436,18 +2844,13 @@ function registerIpcHandlers() {
   ipcMain.handle("settings:reset", () => {
     try {
       settingsStore.set("startWithSystem", defaultSettings.startWithSystem)
+      settingsStore.set("startMinimized", defaultSettings.startMinimized)
       settingsStore.set("closeToTray", defaultSettings.closeToTray)
       settingsStore.set("darkTheme", defaultSettings.darkTheme)
       settingsStore.set("openNewTabs", defaultSettings.openNewTabs)
       settingsStore.set("developerMode", defaultSettings.developerMode)
 
-      if (!isDev) {
-        try {
-          app.setLoginItemSettings({
-            openAtLogin: defaultSettings.startWithSystem
-          })
-        } catch {}
-      }
+      updateLoginItemSettings()
 
       return {
         success: true,
@@ -3290,8 +3693,8 @@ app.whenReady().then(async () => {
   registerIpcHandlers()
   configureAutoUpdater()
   createApplicationMenu()
-  createMainWindow()
   createTray()
+  createMainWindow(shouldStartMinimizedOnLaunch())
 
   if (pluginStore.get("pluginsEnabled")) {
     void ensurePluginNodeRuntimeInstalled(mainWindow?.webContents ?? null).catch((error) => {
@@ -3302,13 +3705,7 @@ app.whenReady().then(async () => {
     })
   }
 
-  if (!isDev) {
-    try {
-      app.setLoginItemSettings({
-        openAtLogin: settingsStore.get("startWithSystem")
-      })
-    } catch {}
-  }
+  updateLoginItemSettings()
 
   if (app.isPackaged) {
     void autoUpdater.checkForUpdatesAndNotify().catch((error) => {
