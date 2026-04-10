@@ -27,6 +27,7 @@ let tray: Tray | null = null
 let isQuitting = false
 let updateProgressWindow: BrowserWindow | null = null
 let manualUpdateCheckRequested = false
+let promptedDownloadedUpdateVersion: string | null = null
 
 const moduleWindows = new Map<string, BrowserWindow>()
 const utilityWatchers = new Map<
@@ -564,6 +565,37 @@ function closeUpdateProgressWindow() {
   updateProgressWindow = null
 }
 
+async function promptToInstallDownloadedUpdate(version: string) {
+  if (promptedDownloadedUpdateVersion === version) {
+    return
+  }
+
+  promptedDownloadedUpdateVersion = version
+  logInfo(`Update downloaded: ${version}.`)
+  closeUpdateProgressWindow()
+
+  const focusedWindow = getFocusedAppWindow()
+
+  const messageBoxOptions = {
+    type: "info" as const,
+    buttons: ["Restart Now", "Later"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "Update Ready",
+    message: `Pokenix Studio ${version} is ready to install.`,
+    detail: "Restart the app now to finish updating."
+  }
+
+  const result = focusedWindow
+    ? await dialog.showMessageBox(focusedWindow, messageBoxOptions)
+    : await dialog.showMessageBox(messageBoxOptions)
+
+  if (result.response === 0) {
+    logInfo(`Installing downloaded update ${version}.`)
+    autoUpdater.quitAndInstall()
+  }
+}
+
 function configureAutoUpdater() {
   autoUpdater.logger = updaterLogger
   autoUpdater.autoDownload = false
@@ -594,16 +626,20 @@ function configureAutoUpdater() {
       : await dialog.showMessageBox(messageBoxOptions)
 
     if (result.response === 0) {
+      promptedDownloadedUpdateVersion = null
       logInfo(`Starting update download for version ${info.version}.`)
       createOrShowUpdateProgressWindow(info.version)
-      void autoUpdater.downloadUpdate().catch((error) => {
-        closeUpdateProgressWindow()
-        logError(
-          `Failed to download update ${info.version}: ${
-            error instanceof Error ? error.message : "Unknown error."
-          }`
-        )
-      })
+      void autoUpdater
+        .downloadUpdate()
+        .then(() => promptToInstallDownloadedUpdate(info.version))
+        .catch((error) => {
+          closeUpdateProgressWindow()
+          logError(
+            `Failed to download update ${info.version}: ${
+              error instanceof Error ? error.message : "Unknown error."
+            }`
+          )
+        })
     } else {
       logInfo(`Update download postponed for version ${info.version}.`)
     }
@@ -657,29 +693,7 @@ function configureAutoUpdater() {
   })
 
   autoUpdater.on("update-downloaded", async (info) => {
-    logInfo(`Update downloaded: ${info.version}.`)
-    closeUpdateProgressWindow()
-
-    const focusedWindow = getFocusedAppWindow()
-
-    const messageBoxOptions = {
-      type: "info" as const,
-      buttons: ["Restart Now", "Later"],
-      defaultId: 0,
-      cancelId: 1,
-      title: "Update Ready",
-      message: `Pokenix Studio ${info.version} is ready to install.`,
-      detail: "Restart the app now to finish updating."
-    }
-
-    const result = focusedWindow
-      ? await dialog.showMessageBox(focusedWindow, messageBoxOptions)
-      : await dialog.showMessageBox(messageBoxOptions)
-
-    if (result.response === 0) {
-      logInfo(`Installing downloaded update ${info.version}.`)
-      autoUpdater.quitAndInstall()
-    }
+    await promptToInstallDownloadedUpdate(info.version)
   })
 }
 

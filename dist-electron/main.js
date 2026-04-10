@@ -18,6 +18,7 @@ let tray = null;
 let isQuitting = false;
 let updateProgressWindow = null;
 let manualUpdateCheckRequested = false;
+let promptedDownloadedUpdateVersion = null;
 const moduleWindows = new Map();
 const utilityWatchers = new Map();
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
@@ -417,6 +418,31 @@ function closeUpdateProgressWindow() {
     updateProgressWindow.close();
     updateProgressWindow = null;
 }
+async function promptToInstallDownloadedUpdate(version) {
+    if (promptedDownloadedUpdateVersion === version) {
+        return;
+    }
+    promptedDownloadedUpdateVersion = version;
+    logInfo(`Update downloaded: ${version}.`);
+    closeUpdateProgressWindow();
+    const focusedWindow = getFocusedAppWindow();
+    const messageBoxOptions = {
+        type: "info",
+        buttons: ["Restart Now", "Later"],
+        defaultId: 0,
+        cancelId: 1,
+        title: "Update Ready",
+        message: `Pokenix Studio ${version} is ready to install.`,
+        detail: "Restart the app now to finish updating."
+    };
+    const result = focusedWindow
+        ? await electron_1.dialog.showMessageBox(focusedWindow, messageBoxOptions)
+        : await electron_1.dialog.showMessageBox(messageBoxOptions);
+    if (result.response === 0) {
+        logInfo(`Installing downloaded update ${version}.`);
+        electron_updater_1.autoUpdater.quitAndInstall();
+    }
+}
 function configureAutoUpdater() {
     electron_updater_1.autoUpdater.logger = updaterLogger;
     electron_updater_1.autoUpdater.autoDownload = false;
@@ -441,9 +467,13 @@ function configureAutoUpdater() {
             ? await electron_1.dialog.showMessageBox(focusedWindow, messageBoxOptions)
             : await electron_1.dialog.showMessageBox(messageBoxOptions);
         if (result.response === 0) {
+            promptedDownloadedUpdateVersion = null;
             logInfo(`Starting update download for version ${info.version}.`);
             createOrShowUpdateProgressWindow(info.version);
-            void electron_updater_1.autoUpdater.downloadUpdate().catch((error) => {
+            void electron_updater_1.autoUpdater
+                .downloadUpdate()
+                .then(() => promptToInstallDownloadedUpdate(info.version))
+                .catch((error) => {
                 closeUpdateProgressWindow();
                 logError(`Failed to download update ${info.version}: ${error instanceof Error ? error.message : "Unknown error."}`);
             });
@@ -494,25 +524,7 @@ function configureAutoUpdater() {
         updateDownloadProgressWindow(progress.percent);
     });
     electron_updater_1.autoUpdater.on("update-downloaded", async (info) => {
-        logInfo(`Update downloaded: ${info.version}.`);
-        closeUpdateProgressWindow();
-        const focusedWindow = getFocusedAppWindow();
-        const messageBoxOptions = {
-            type: "info",
-            buttons: ["Restart Now", "Later"],
-            defaultId: 0,
-            cancelId: 1,
-            title: "Update Ready",
-            message: `Pokenix Studio ${info.version} is ready to install.`,
-            detail: "Restart the app now to finish updating."
-        };
-        const result = focusedWindow
-            ? await electron_1.dialog.showMessageBox(focusedWindow, messageBoxOptions)
-            : await electron_1.dialog.showMessageBox(messageBoxOptions);
-        if (result.response === 0) {
-            logInfo(`Installing downloaded update ${info.version}.`);
-            electron_updater_1.autoUpdater.quitAndInstall();
-        }
+        await promptToInstallDownloadedUpdate(info.version);
     });
 }
 function getPluginsDirectory() {
