@@ -318,9 +318,22 @@ function updateLoginItemSettings() {
   if (isDev) return
 
   try {
+    const openAtLogin = settingsStore.get("startWithSystem")
+    const openAsHidden = openAtLogin && settingsStore.get("startMinimized")
+
+    if (process.platform === "win32") {
+      app.setLoginItemSettings({
+        openAtLogin,
+        openAsHidden,
+        path: process.execPath,
+        args: openAsHidden ? ["--pxs-start-minimized"] : []
+      })
+      return
+    }
+
     app.setLoginItemSettings({
-      openAtLogin: settingsStore.get("startWithSystem"),
-      openAsHidden: settingsStore.get("startWithSystem") && settingsStore.get("startMinimized")
+      openAtLogin,
+      openAsHidden
     })
   } catch {}
 }
@@ -329,6 +342,10 @@ function shouldStartMinimizedOnLaunch() {
   if (isDev) return false
   if (!settingsStore.get("startWithSystem")) return false
   if (!settingsStore.get("startMinimized")) return false
+
+  if (process.platform === "win32") {
+    return process.argv.includes("--pxs-start-minimized")
+  }
 
   try {
     return Boolean(app.getLoginItemSettings().wasOpenedAtLogin)

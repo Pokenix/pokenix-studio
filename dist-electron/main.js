@@ -197,9 +197,20 @@ function updateLoginItemSettings() {
     if (isDev)
         return;
     try {
+        const openAtLogin = settingsStore.get("startWithSystem");
+        const openAsHidden = openAtLogin && settingsStore.get("startMinimized");
+        if (process.platform === "win32") {
+            electron_1.app.setLoginItemSettings({
+                openAtLogin,
+                openAsHidden,
+                path: process.execPath,
+                args: openAsHidden ? ["--pxs-start-minimized"] : []
+            });
+            return;
+        }
         electron_1.app.setLoginItemSettings({
-            openAtLogin: settingsStore.get("startWithSystem"),
-            openAsHidden: settingsStore.get("startWithSystem") && settingsStore.get("startMinimized")
+            openAtLogin,
+            openAsHidden
         });
     }
     catch { }
@@ -211,6 +222,9 @@ function shouldStartMinimizedOnLaunch() {
         return false;
     if (!settingsStore.get("startMinimized"))
         return false;
+    if (process.platform === "win32") {
+        return process.argv.includes("--pxs-start-minimized");
+    }
     try {
         return Boolean(electron_1.app.getLoginItemSettings().wasOpenedAtLogin);
     }
