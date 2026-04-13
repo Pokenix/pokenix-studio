@@ -1,7 +1,7 @@
 {
   "name": "pokenix-studio",
   "productName": "Pokenix Studio",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Pokenix Studio - modular desktop productivity hub",
   "author": "Pokenix <contact@pokenix.com>",
   "homepage": "https://pokenix.com/studio",
@@ -67,7 +67,9 @@
     "electron-log": "^5.4.3",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.3",
+    "jsqr": "^1.4.0",
     "lucide-react": "^0.577.0",
+    "qrcode": "^1.5.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "zustand": "^5.0.11"

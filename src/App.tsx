@@ -1,5 +1,7 @@
 import "./index.css"
-import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo, Hash, X, Clock3, Bell } from "lucide-react"
+import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo, Hash, X, Clock3, Bell, FileText, Calculator, ScanLine } from "lucide-react"
+import jsQR from "jsqr"
+import QRCode from "qrcode"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 type Page = "home" | "plugins" | "themes" | "hub" | "settings" | "console"
@@ -13,13 +15,15 @@ type AppSettings = {
   developerMode: boolean
 }
 
-type ModuleId = "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "utility-tools"
+type ModuleId = "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "calculator" | "utility-tools" | "pokenix-actions"
 
 type ModuleItem = {
   id: ModuleId
   title: string
   description: string
   icon: React.ReactNode
+  searchTerms?: string[]
+  badge?: string
 }
 
 type SettingsSetResponse = {
@@ -149,6 +153,9 @@ type AlarmItem = {
   dismissed: boolean
 }
 
+const MODULE_RECENCY_STORAGE_KEY = "pxs-module-recency"
+const UTILITY_TOOL_RECENCY_STORAGE_KEY = "pxs-utility-tool-recency"
+
 declare global {
   interface Window {
     require?: (id: string) => unknown
@@ -254,6 +261,8 @@ declare global {
         counterSet: (value: number) => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
         counterDeleteEntry: (entryId: string) => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
         counterClear: () => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
+        saveQrImage: (dataUrl: string) => Promise<{ success: boolean; path?: string; error?: string }>
+        copyQrImage: (dataUrl: string) => Promise<{ success: boolean; error?: string }>
         timerAlarmGet: () => Promise<{ elapsed: number; laps: TimerLapItem[]; countdownRemaining: number; alarms: AlarmItem[] }>
         timerAlarmSet: (payload: {
           elapsed: number
@@ -327,7 +336,25 @@ declare global {
   }
 }
 
-function HomePage({ modules }: { modules: ModuleItem[] }) {
+function HomePage({
+  modules,
+  onOpenModule
+}: {
+  modules: ModuleItem[]
+  onOpenModule: (moduleId: ModuleId) => void
+}) {
+  const [moduleQuery, setModuleQuery] = useState("")
+
+  const filteredModules = useMemo(() => {
+    const normalizedQuery = moduleQuery.trim().toLocaleLowerCase()
+    if (!normalizedQuery) return modules
+
+    return modules.filter((module) => {
+      const haystack = `${module.title} ${module.description} ${(module.searchTerms || []).join(" ")}`.toLocaleLowerCase()
+      return haystack.includes(normalizedQuery)
+    })
+  }, [moduleQuery, modules])
+
   return (
     <>
       <div className="topbar">
@@ -335,31 +362,47 @@ function HomePage({ modules }: { modules: ModuleItem[] }) {
           <h1>Welcome back</h1>
           <p>Choose a module to get started.</p>
         </div>
+
+        <div className="home-search">
+          <Search size={16} />
+          <input
+            className="home-search-input"
+            onChange={(event) => setModuleQuery(event.target.value)}
+            placeholder="Search modules..."
+            type="text"
+            value={moduleQuery}
+          />
+        </div>
       </div>
 
       <section className="modules-section">
         <div className="section-header">
           <h2>Modules</h2>
-          <span>{modules.length} available</span>
+          <span>{filteredModules.length} available</span>
         </div>
 
         <div className="module-grid">
-          {modules.map((module) => (
+          {filteredModules.map((module) => (
             <button
               key={module.id}
               className="module-card"
               onClick={() => {
-                void window.hubAPI.modules.open(module.id)
+                onOpenModule(module.id)
               }}
             >
               <div className="module-icon">{module.icon}</div>
               <div className="module-info">
+                {module.badge ? <span className="module-badge">{module.badge}</span> : null}
                 <h3>{module.title}</h3>
                 <p>{module.description}</p>
               </div>
             </button>
           ))}
         </div>
+
+        {filteredModules.length === 0 ? (
+          <p className="home-search-empty">No modules matched your search.</p>
+        ) : null}
       </section>
     </>
   )
@@ -531,6 +574,285 @@ function parseHslColor(value: string): RgbColor | null {
     g: clampColorChannel((greenPrime + match) * 255),
     b: clampColorChannel((bluePrime + match) * 255)
   }
+}
+
+function safeJsonStringify(value: unknown, spacing = 2) {
+  return JSON.stringify(value, null, spacing)
+}
+
+function normalizeJsonInput(value: string) {
+  return value.trim()
+}
+
+function parseJsonInput(value: string): { ok: true; data: unknown } | { ok: false; error: string } {
+  try {
+    return {
+      ok: true,
+      data: JSON.parse(value)
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Invalid JSON."
+    }
+  }
+}
+
+function jsonValueLabel(key: string | number | null, value: unknown) {
+  const prefix = key === null ? "root" : String(key)
+
+  if (Array.isArray(value)) {
+    return `${prefix}: [${value.length}]`
+  }
+
+  if (value !== null && typeof value === "object") {
+    return `${prefix}: {}`
+  }
+
+  return `${prefix}: ${JSON.stringify(value)}`
+}
+
+function buildJsonTreeLines(value: unknown, key: string | number | null = null, prefix = ""): string[] {
+  const label = jsonValueLabel(key, value)
+
+  if (value === null || typeof value !== "object") {
+    return [prefix ? `${prefix}${label}` : label]
+  }
+
+  const entries = Array.isArray(value)
+    ? value.map((item, index) => [index, item] as const)
+    : Object.entries(value)
+
+  const lines = [prefix ? `${prefix}${label}` : label]
+
+  entries.forEach(([entryKey, entryValue], index) => {
+    const isLast = index === entries.length - 1
+    const branch = isLast ? "└─ " : "├─ "
+    const nextPrefix = prefix + (isLast ? "   " : "│  ")
+    const childLines = buildJsonTreeLines(entryValue, entryKey, nextPrefix)
+
+    lines.push(`${prefix}${branch}${childLines[0].slice(nextPrefix.length)}`)
+    lines.push(...childLines.slice(1))
+  })
+
+  return lines
+}
+
+function tokenizeJsonPath(pathValue: string) {
+  const tokens: string[] = []
+  const pattern = /([^[.\]]+)|\[(\d+)\]/g
+  const trimmed = pathValue.trim()
+  let match: RegExpExecArray | null
+
+  while ((match = pattern.exec(trimmed)) !== null) {
+    tokens.push(match[1] ?? match[2])
+  }
+
+  return tokens
+}
+
+function getValueAtJsonPath(source: unknown, pathValue: string): { found: true; value: unknown } | { found: false; error: string } {
+  const tokens = tokenizeJsonPath(pathValue)
+
+  if (tokens.length === 0) {
+    return { found: false, error: "Enter a path like user.profile.name or items[0].id." }
+  }
+
+  let current: unknown = source
+
+  for (const token of tokens) {
+    if (Array.isArray(current)) {
+      const index = Number.parseInt(token, 10)
+      if (Number.isNaN(index) || index < 0 || index >= current.length) {
+        return { found: false, error: `Path not found at [${token}].` }
+      }
+
+      current = current[index]
+      continue
+    }
+
+    if (current !== null && typeof current === "object" && token in current) {
+      current = (current as Record<string, unknown>)[token]
+      continue
+    }
+
+    return { found: false, error: `Path not found at ${token}.` }
+  }
+
+  return { found: true, value: current }
+}
+
+function sortJsonKeys(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonKeys)
+  }
+
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entryValue]) => [key, sortJsonKeys(entryValue)])
+    )
+  }
+
+  return value
+}
+
+function renderMarkdownInline(text: string, keyPrefix: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = []
+  const pattern = /(\[[^\]]+\]\((https?:\/\/[^\s)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*|`([^`]+)`)/g
+  let lastIndex = 0
+  let match: RegExpExecArray | null = null
+  let index = 0
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index))
+    }
+
+    if (match[2]) {
+      const fullMatch = match[1]
+      const label = fullMatch.slice(1, fullMatch.indexOf("]"))
+      const url = match[2]
+      parts.push(
+        <a
+          className="markdown-link"
+          href={url}
+          key={`${keyPrefix}-inline-${index}`}
+          onClick={(event) => {
+            event.preventDefault()
+            void window.hubAPI.app.openExternalUrl(url)
+          }}
+        >
+          {label}
+        </a>
+      )
+    } else if (match[3]) {
+      parts.push(<strong key={`${keyPrefix}-inline-${index}`}>{match[3]}</strong>)
+    } else if (match[4]) {
+      parts.push(<em key={`${keyPrefix}-inline-${index}`}>{match[4]}</em>)
+    } else if (match[5]) {
+      parts.push(<code className="markdown-inline-code" key={`${keyPrefix}-inline-${index}`}>{match[5]}</code>)
+    }
+
+    lastIndex = pattern.lastIndex
+    index += 1
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex))
+  }
+
+  return parts.length > 0 ? parts : [text]
+}
+
+function renderMarkdownBlocks(markdown: string): React.ReactNode[] {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n")
+  const blocks: React.ReactNode[] = []
+  let index = 0
+
+  while (index < lines.length) {
+    const line = lines[index]
+    const trimmed = line.trim()
+
+    if (!trimmed) {
+      index += 1
+      continue
+    }
+
+    if (trimmed.startsWith("```")) {
+      const codeLines: string[] = []
+      index += 1
+
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index])
+        index += 1
+      }
+
+      if (index < lines.length) {
+        index += 1
+      }
+
+      blocks.push(
+        <pre className="markdown-code-block" key={`md-code-${blocks.length}`}>
+          <code>{codeLines.join("\n")}</code>
+        </pre>
+      )
+      continue
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)$/)
+    if (headingMatch) {
+      const level = headingMatch[1].length
+      const content = renderMarkdownInline(headingMatch[2], `md-heading-${blocks.length}`)
+      const className = `markdown-heading markdown-heading-${level}`
+
+      if (level === 1) blocks.push(<h1 className={className} key={`md-heading-${blocks.length}`}>{content}</h1>)
+      else if (level === 2) blocks.push(<h2 className={className} key={`md-heading-${blocks.length}`}>{content}</h2>)
+      else if (level === 3) blocks.push(<h3 className={className} key={`md-heading-${blocks.length}`}>{content}</h3>)
+      else if (level === 4) blocks.push(<h4 className={className} key={`md-heading-${blocks.length}`}>{content}</h4>)
+      else if (level === 5) blocks.push(<h5 className={className} key={`md-heading-${blocks.length}`}>{content}</h5>)
+      else blocks.push(<h6 className={className} key={`md-heading-${blocks.length}`}>{content}</h6>)
+
+      index += 1
+      continue
+    }
+
+    if (/^>\s+/.test(trimmed)) {
+      const quoteLines: string[] = []
+      while (index < lines.length && /^>\s+/.test(lines[index].trim())) {
+        quoteLines.push(lines[index].trim().replace(/^>\s+/, ""))
+        index += 1
+      }
+
+      blocks.push(
+        <blockquote className="markdown-blockquote" key={`md-quote-${blocks.length}`}>
+          {quoteLines.map((quoteLine, quoteIndex) => (
+            <p key={`md-quote-line-${quoteIndex}`}>{renderMarkdownInline(quoteLine, `md-quote-${blocks.length}-${quoteIndex}`)}</p>
+          ))}
+        </blockquote>
+      )
+      continue
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = []
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^[-*]\s+/, ""))
+        index += 1
+      }
+
+      blocks.push(
+        <ul className="markdown-list" key={`md-list-${blocks.length}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`md-list-item-${itemIndex}`}>{renderMarkdownInline(item, `md-list-${blocks.length}-${itemIndex}`)}</li>
+          ))}
+        </ul>
+      )
+      continue
+    }
+
+    const paragraphLines: string[] = []
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !lines[index].trim().startsWith("```") &&
+      !/^(#{1,6})\s+/.test(lines[index].trim()) &&
+      !/^>\s+/.test(lines[index].trim()) &&
+      !/^[-*]\s+/.test(lines[index].trim())
+    ) {
+      paragraphLines.push(lines[index].trim())
+      index += 1
+    }
+
+    blocks.push(
+      <p className="markdown-paragraph" key={`md-paragraph-${blocks.length}`}>
+        {renderMarkdownInline(paragraphLines.join(" "), `md-paragraph-${blocks.length}`)}
+      </p>
+    )
+  }
+
+  return blocks
 }
 
 function SettingsPage({
@@ -1345,6 +1667,179 @@ function getNextAlarmTimestamp(value: string) {
   return next.getTime()
 }
 
+function evaluateCalculatorExpression(expression: string) {
+  const normalized = expression
+    .replace(/×/g, "*")
+    .replace(/÷/g, "/")
+    .replace(/−/g, "-")
+    .replace(/\s+/g, "")
+
+  if (!normalized) {
+    return { ok: false as const, error: "Enter a calculation first." }
+  }
+
+  if (!/^[0-9+\-*/().%]+$/.test(normalized)) {
+    return { ok: false as const, error: "That expression contains unsupported characters." }
+  }
+
+  try {
+    const result = Function(`"use strict"; return (${normalized})`)() as number
+
+    if (!Number.isFinite(result)) {
+      return { ok: false as const, error: "The result is not a valid number." }
+    }
+
+    return { ok: true as const, result }
+  } catch {
+    return { ok: false as const, error: "That expression could not be calculated." }
+  }
+}
+
+function formatCalculatorResult(value: number) {
+  if (Number.isInteger(value)) {
+    return String(value)
+  }
+
+  return Number(value.toFixed(10)).toString()
+}
+
+function CalculatorPage() {
+  const [expression, setExpression] = useState("")
+  const [display, setDisplay] = useState("0")
+  const [calculatorMessage, setCalculatorMessage] = useState("")
+
+  const appendValue = (value: string) => {
+    const nextExpression = expression + value
+    setExpression(nextExpression)
+    setDisplay(nextExpression)
+    setCalculatorMessage("")
+  }
+
+  const clearCalculator = () => {
+    setExpression("")
+    setDisplay("0")
+    setCalculatorMessage("")
+  }
+
+  const backspaceCalculator = () => {
+    const nextExpression = expression.slice(0, -1)
+    setExpression(nextExpression)
+    setDisplay(nextExpression || "0")
+    setCalculatorMessage("")
+  }
+
+  const calculateResult = () => {
+    const result = evaluateCalculatorExpression(expression)
+    if (!result.ok) {
+      setCalculatorMessage(result.error)
+      return
+    }
+
+    const formatted = formatCalculatorResult(result.result)
+    setExpression(formatted)
+    setDisplay(formatted)
+    setCalculatorMessage("")
+  }
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (/^[0-9]$/.test(event.key)) {
+        event.preventDefault()
+        appendValue(event.key)
+        return
+      }
+
+      if (["+", "-", "*", "/", ".", "(", ")"].includes(event.key)) {
+        event.preventDefault()
+        appendValue(event.key)
+        return
+      }
+
+      if (event.key === "Enter" || event.key === "=") {
+        event.preventDefault()
+        calculateResult()
+        return
+      }
+
+      if (event.key === "Backspace") {
+        event.preventDefault()
+        backspaceCalculator()
+        return
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault()
+        clearCalculator()
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [expression])
+
+  const buttons = [
+    ["C", "(", ")", "⌫"],
+    ["7", "8", "9", "÷"],
+    ["4", "5", "6", "×"],
+    ["1", "2", "3", "-"],
+    ["0", ".", "%", "+"]
+  ]
+
+  return (
+    <div className="settings-page calculator-page">
+      <h1>Calculator</h1>
+      <p className="page-subtitle">A simple calculator for quick desktop math.</p>
+
+      <div className="calculator-shell">
+        <div className="calculator-display-wrap">
+          <div className="calculator-expression">{expression || " "}</div>
+          <div className="calculator-display">{display}</div>
+        </div>
+
+        {calculatorMessage ? <p className="utility-message utility-message-error">{calculatorMessage}</p> : null}
+
+        <div className="calculator-grid">
+          {buttons.flat().map((button) => (
+            <button
+              key={button}
+              className={[
+                "calculator-btn",
+                ["+", "-", "×", "÷", "%", "(", ")"].includes(button) ? "calculator-btn-operator" : "",
+                button === "C" ? "calculator-btn-clear" : "",
+                button === "⌫" ? "calculator-btn-delete" : ""
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              onClick={() => {
+                if (button === "C") {
+                  clearCalculator()
+                  return
+                }
+
+                if (button === "⌫") {
+                  backspaceCalculator()
+                  return
+                }
+
+                appendValue(button)
+              }}
+              type="button"
+            >
+              {button}
+            </button>
+          ))}
+
+          <button className="calculator-btn calculator-btn-equals" onClick={calculateResult} type="button">
+            =
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function TimerAlarmPage() {
   const [stopwatchRunning, setStopwatchRunning] = useState(false)
   const [stopwatchElapsed, setStopwatchElapsed] = useState(0)
@@ -1856,7 +2351,7 @@ function TimerAlarmPage() {
 }
 
 function UtilityToolsPage() {
-  const [activeTool, setActiveTool] = useState<"home" | "file-manager" | "color-tools">("home")
+  const [activeTool, setActiveTool] = useState<"home" | "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools">("home")
   const [activeFileManagerTool, setActiveFileManagerTool] = useState<
     "home" | "create-files" | "move-files" | "directory-structure" | "file-watcher"
   >("home")
@@ -1888,7 +2383,169 @@ function UtilityToolsPage() {
   const [hslS, setHslS] = useState("100")
   const [hslL, setHslL] = useState("61")
   const [colorMessage, setColorMessage] = useState("")
+  const [jsonInput, setJsonInput] = useState('{\n  "user": {\n    "name": "Pokenix",\n    "roles": ["admin", "editor", "editor"],\n    "active": true\n  },\n  "items": [3, 1, 2, 2, null, 5]\n}')
+  const [jsonPathQuery, setJsonPathQuery] = useState("user.name")
+  const [jsonArrayPath, setJsonArrayPath] = useState("items")
+  const [jsonMessage, setJsonMessage] = useState("")
+  const [jsonPathMessage, setJsonPathMessage] = useState("")
+  const [jsonArrayMessage, setJsonArrayMessage] = useState("")
+  const [utilitySearchQuery, setUtilitySearchQuery] = useState("")
+  const [utilityToolRecency, setUtilityToolRecency] = useState<Array<"file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools">>([])
+  const [markdownInput, setMarkdownInput] = useState(`# Markdown Preview
+
+Write your markdown on the left and see the preview on the right.
+
+## Supported
+- Headings
+- Lists
+- **Bold**
+- *Italic*
+- \`Inline code\`
+- [Links](https://www.pokenix.com/studio)
+
+> This is a simple built-in preview.
+
+\`\`\`ts
+console.log("Pokenix Studio")
+\`\`\`
+`)
+  const [qrText, setQrText] = useState("https://www.pokenix.com/studio")
+  const [qrDataUrl, setQrDataUrl] = useState("")
+  const [qrMessage, setQrMessage] = useState("")
+  const [qrReaderPreview, setQrReaderPreview] = useState("")
+  const [qrReaderResult, setQrReaderResult] = useState("")
+  const [qrReaderMessage, setQrReaderMessage] = useState("")
   const colorPickerRef = useRef<HTMLInputElement | null>(null)
+
+  const parsedJson = useMemo(() => parseJsonInput(normalizeJsonInput(jsonInput)), [jsonInput])
+
+  const jsonPrettyOutput = useMemo(() => {
+    if (!parsedJson.ok) return ""
+    return safeJsonStringify(parsedJson.data, 2)
+  }, [parsedJson])
+
+  const jsonMinifiedOutput = useMemo(() => {
+    if (!parsedJson.ok) return ""
+    return JSON.stringify(parsedJson.data)
+  }, [parsedJson])
+
+  const jsonTreeOutput = useMemo(() => {
+    if (!parsedJson.ok) return ""
+    return buildJsonTreeLines(parsedJson.data).join("\n")
+  }, [parsedJson])
+
+  const jsonPathResult = useMemo(() => {
+    if (!parsedJson.ok) {
+      return { ok: false as const, error: "Fix the JSON first." }
+    }
+
+    const result = getValueAtJsonPath(parsedJson.data, jsonPathQuery)
+    if (!result.found) {
+      return { ok: false as const, error: result.error }
+    }
+
+    return {
+      ok: true as const,
+      output:
+        typeof result.value === "string"
+          ? result.value
+          : safeJsonStringify(result.value, 2)
+    }
+  }, [parsedJson, jsonPathQuery])
+
+  const markdownPreview = useMemo(() => renderMarkdownBlocks(markdownInput), [markdownInput])
+
+  const utilityToolCards = useMemo(
+    () => [
+      {
+        id: "file-manager" as const,
+        title: "File Manager",
+        description: "Browse and manage files from a dedicated utility page.",
+        icon: <FolderKanban size={22} />
+      },
+      {
+        id: "color-tools" as const,
+        title: "Color Tools",
+        description: "Color conversion and palette helpers in one place.",
+        icon: <Palette size={22} />
+      },
+      {
+        id: "json-tools" as const,
+        title: "JSON Tools",
+        description: "Validate, inspect, and transform JSON quickly.",
+        icon: <Blocks size={22} />
+      },
+      {
+        id: "markdown-tools" as const,
+        title: "Markdown Tools",
+        description: "Write markdown and preview it live.",
+        icon: <FileText size={22} />
+      },
+      {
+        id: "qr-tools" as const,
+        title: "QR Tools",
+        description: "Create QR codes and read them from image files.",
+        icon: <ScanLine size={22} />
+      }
+    ],
+    []
+  )
+
+  const sortedUtilityToolCards = useMemo(() => {
+    if (utilityToolRecency.length === 0) return utilityToolCards
+
+    const priorityMap = new Map(utilityToolRecency.map((toolId, index) => [toolId, index]))
+
+    return [...utilityToolCards].sort((left, right) => {
+      const leftPriority = priorityMap.get(left.id)
+      const rightPriority = priorityMap.get(right.id)
+
+      if (leftPriority === undefined && rightPriority === undefined) return 0
+      if (leftPriority === undefined) return 1
+      if (rightPriority === undefined) return -1
+
+      return leftPriority - rightPriority
+    })
+  }, [utilityToolCards, utilityToolRecency])
+
+  const filteredUtilityToolCards = useMemo(() => {
+    const normalizedQuery = utilitySearchQuery.trim().toLocaleLowerCase()
+    if (!normalizedQuery) return sortedUtilityToolCards
+
+    return sortedUtilityToolCards.filter((tool) => {
+      const haystack = `${tool.title} ${tool.description}`.toLocaleLowerCase()
+      return haystack.includes(normalizedQuery)
+    })
+  }, [utilitySearchQuery, sortedUtilityToolCards])
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(UTILITY_TOOL_RECENCY_STORAGE_KEY)
+      if (!raw) return
+
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return
+
+      const validIds = parsed.filter(
+        (value): value is "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" =>
+          typeof value === "string"
+      )
+      setUtilityToolRecency(validIds)
+    } catch {
+      setUtilityToolRecency([])
+    }
+  }, [])
+
+  const openUtilityTool = (
+    toolId: "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools"
+  ) => {
+    setActiveTool(toolId)
+    setUtilityToolRecency((current) => {
+      const next = [toolId, ...current.filter((item) => item !== toolId)]
+      window.localStorage.setItem(UTILITY_TOOL_RECENCY_STORAGE_KEY, JSON.stringify(next))
+      return next
+    })
+  }
 
   const colorPreview = useMemo(() => {
     const hexRgb = hexToRgb(hexValue)
@@ -2196,6 +2853,53 @@ function UtilityToolsPage() {
       void window.hubAPI.utility.stopFileWatcher()
     }
   }, [activeTool, activeFileManagerTool])
+
+  useEffect(() => {
+    return () => {
+      if (qrReaderPreview.startsWith("blob:")) {
+        URL.revokeObjectURL(qrReaderPreview)
+      }
+    }
+  }, [qrReaderPreview])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const generateQr = async () => {
+      if (!qrText.trim()) {
+        setQrDataUrl("")
+        setQrMessage("Enter text or a link to generate a QR code.")
+        return
+      }
+
+      try {
+        const dataUrl = await QRCode.toDataURL(qrText, {
+          width: 320,
+          margin: 2,
+          color: {
+            dark: "#0b0e14",
+            light: "#ffffff"
+          }
+        })
+
+        if (!cancelled) {
+          setQrDataUrl(dataUrl)
+          setQrMessage("")
+        }
+      } catch {
+        if (!cancelled) {
+          setQrDataUrl("")
+          setQrMessage("Could not generate the QR code.")
+        }
+      }
+    }
+
+    void generateQr()
+
+    return () => {
+      cancelled = true
+    }
+  }, [qrText])
 
   if (activeTool === "file-manager" && activeFileManagerTool === "create-files") {
     return (
@@ -2864,33 +3568,440 @@ function UtilityToolsPage() {
     )
   }
 
+  if (activeTool === "json-tools") {
+    const runArrayTool = (mode: "sort-asc" | "sort-desc" | "reverse" | "unique" | "remove-falsy") => {
+      if (!parsedJson.ok) {
+        setJsonArrayMessage("Fix the JSON first.")
+        return
+      }
+
+      const pathResult = getValueAtJsonPath(parsedJson.data, jsonArrayPath)
+      if (!pathResult.found) {
+        setJsonArrayMessage(pathResult.error)
+        return
+      }
+
+      if (!Array.isArray(pathResult.value)) {
+        setJsonArrayMessage("The selected path is not an array.")
+        return
+      }
+
+      let nextValue = [...pathResult.value]
+
+      if (mode === "sort-asc") {
+        nextValue.sort((left, right) => String(left).localeCompare(String(right), undefined, { numeric: true }))
+      }
+
+      if (mode === "sort-desc") {
+        nextValue.sort((left, right) => String(right).localeCompare(String(left), undefined, { numeric: true }))
+      }
+
+      if (mode === "reverse") {
+        nextValue.reverse()
+      }
+
+      if (mode === "unique") {
+        nextValue = nextValue.filter((item, index, array) => array.findIndex((entry) => JSON.stringify(entry) === JSON.stringify(item)) === index)
+      }
+
+      if (mode === "remove-falsy") {
+        nextValue = nextValue.filter(Boolean)
+      }
+
+      setJsonArrayMessage(safeJsonStringify(nextValue, 2))
+    }
+
+    return (
+      <div className="settings-page utility-page">
+        <button
+          className="utility-back-btn"
+          onClick={() => {
+            setActiveTool("home")
+          }}
+          type="button"
+        >
+          <ArrowLeft size={16} />
+          <span>Back</span>
+        </button>
+
+        <h1>JSON Tools</h1>
+        <p className="page-subtitle">Validate, format, inspect, and manipulate JSON in one place.</p>
+
+        <div className="settings-group">
+          <h3>JSON Input</h3>
+          <textarea
+            className="notepad-editor utility-json-editor"
+            onChange={(event) => {
+              setJsonInput(event.target.value)
+              setJsonMessage("")
+            }}
+            spellCheck={false}
+            value={jsonInput}
+          />
+          <div className="settings-action-row">
+            <button
+              className="notepad-action-btn"
+              onClick={() => {
+                if (!parsedJson.ok) {
+                  setJsonMessage(parsedJson.error)
+                  return
+                }
+
+                setJsonMessage("JSON is valid.")
+              }}
+              type="button"
+            >
+              Validate
+            </button>
+            <button
+              className="notepad-action-btn"
+              onClick={() => {
+                if (!parsedJson.ok) {
+                  setJsonMessage(parsedJson.error)
+                  return
+                }
+
+                setJsonInput(jsonPrettyOutput)
+                setJsonMessage("Formatted.")
+              }}
+              type="button"
+            >
+              Pretty
+            </button>
+            <button
+              className="notepad-action-btn"
+              onClick={() => {
+                if (!parsedJson.ok) {
+                  setJsonMessage(parsedJson.error)
+                  return
+                }
+
+                setJsonInput(jsonMinifiedOutput)
+                setJsonMessage("Minified.")
+              }}
+              type="button"
+            >
+              Minify
+            </button>
+            <button
+              className="notepad-action-btn"
+              onClick={() => {
+                if (!parsedJson.ok) {
+                  setJsonMessage(parsedJson.error)
+                  return
+                }
+
+                setJsonInput(safeJsonStringify(sortJsonKeys(parsedJson.data), 2))
+                setJsonMessage("Keys sorted.")
+              }}
+              type="button"
+            >
+              Sort Keys
+            </button>
+          </div>
+          {jsonMessage ? (
+            <p className={`utility-message ${jsonMessage === "JSON is valid." || jsonMessage.endsWith(".") ? "" : "utility-message-error"}`}>
+              {jsonMessage}
+            </p>
+          ) : null}
+          {!parsedJson.ok ? <p className="utility-message utility-message-error">{parsedJson.error}</p> : null}
+        </div>
+
+        <div className="settings-group">
+          <h3>Tree Viewer</h3>
+          <pre className="utility-code-block">{parsedJson.ok ? jsonTreeOutput : "Enter valid JSON to view the tree."}</pre>
+        </div>
+
+        <div className="settings-group">
+          <h3>Path Finder</h3>
+          <input
+            className="utility-input"
+            onChange={(event) => {
+              setJsonPathQuery(event.target.value)
+              setJsonPathMessage("")
+            }}
+            placeholder="user.name or items[0]"
+            type="text"
+            value={jsonPathQuery}
+          />
+          <div className="settings-action-row">
+            <button
+              className="notepad-action-btn"
+              onClick={() => {
+                setJsonPathMessage(jsonPathResult.ok ? jsonPathResult.output : jsonPathResult.error)
+              }}
+              type="button"
+            >
+              Find Path
+            </button>
+          </div>
+          <pre className="utility-code-block">
+            {jsonPathMessage || "Enter a JSON path and click Find Path."}
+          </pre>
+        </div>
+
+        <div className="settings-group">
+          <h3>Pretty / Minify</h3>
+          <div className="json-tools-grid">
+            <div>
+              <p className="json-tools-label">Pretty</p>
+              <pre className="utility-code-block utility-code-block-small">
+                {parsedJson.ok ? jsonPrettyOutput : "Enter valid JSON to pretty print."}
+              </pre>
+            </div>
+            <div>
+              <p className="json-tools-label">Minified</p>
+              <pre className="utility-code-block utility-code-block-small">
+                {parsedJson.ok ? jsonMinifiedOutput : "Enter valid JSON to minify."}
+              </pre>
+            </div>
+          </div>
+        </div>
+
+        <div className="settings-group">
+          <h3>Array Tools</h3>
+          <input
+            className="utility-input"
+            onChange={(event) => {
+              setJsonArrayPath(event.target.value)
+              setJsonArrayMessage("")
+            }}
+            placeholder="items"
+            type="text"
+            value={jsonArrayPath}
+          />
+          <div className="settings-action-row">
+            <button className="notepad-action-btn" onClick={() => runArrayTool("sort-asc")} type="button">
+              Sort Asc
+            </button>
+            <button className="notepad-action-btn" onClick={() => runArrayTool("sort-desc")} type="button">
+              Sort Desc
+            </button>
+            <button className="notepad-action-btn" onClick={() => runArrayTool("reverse")} type="button">
+              Reverse
+            </button>
+            <button className="notepad-action-btn" onClick={() => runArrayTool("unique")} type="button">
+              Unique
+            </button>
+            <button className="notepad-action-btn" onClick={() => runArrayTool("remove-falsy")} type="button">
+              Remove Falsy
+            </button>
+          </div>
+          <pre className="utility-code-block">
+            {jsonArrayMessage || "Choose a path to an array and run an array tool."}
+          </pre>
+        </div>
+      </div>
+    )
+  }
+
+  if (activeTool === "markdown-tools") {
+    return (
+      <div className="settings-page utility-page">
+        <button
+          className="utility-back-btn"
+          onClick={() => {
+            setActiveTool("home")
+          }}
+          type="button"
+        >
+          <ArrowLeft size={16} />
+          <span>Back</span>
+        </button>
+
+        <h1>Markdown Tools</h1>
+        <p className="page-subtitle">Write markdown on the left and preview it live on the right.</p>
+
+        <div className="markdown-tools-grid">
+          <div className="settings-group">
+            <h3>Markdown Input</h3>
+            <textarea
+              className="notepad-editor utility-json-editor"
+              onChange={(event) => setMarkdownInput(event.target.value)}
+              spellCheck={false}
+              value={markdownInput}
+            />
+          </div>
+
+          <div className="settings-group">
+            <h3>Live Preview</h3>
+            <div className="markdown-preview-shell">
+              {markdownInput.trim() ? markdownPreview : <p className="markdown-empty">Start writing markdown to preview it here.</p>}
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (activeTool === "qr-tools") {
+    const readQrFromFile = async (file: File | null) => {
+      if (!file) return
+
+      try {
+        const previewUrl = URL.createObjectURL(file)
+        setQrReaderPreview(previewUrl)
+        setQrReaderMessage("Reading QR code...")
+        setQrReaderResult("")
+
+        const imageUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "")
+          reader.onerror = () => reject(new Error("file-read-error"))
+          reader.readAsDataURL(file)
+        })
+
+        const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const nextImage = new Image()
+          nextImage.onload = () => resolve(nextImage)
+          nextImage.onerror = () => reject(new Error("image-load-error"))
+          nextImage.src = imageUrl
+        })
+
+        const canvas = document.createElement("canvas")
+        canvas.width = image.width
+        canvas.height = image.height
+        const context = canvas.getContext("2d")
+
+        if (!context) {
+          setQrReaderMessage("Could not read that image.")
+          return
+        }
+
+        context.drawImage(image, 0, 0)
+        const imageData = context.getImageData(0, 0, canvas.width, canvas.height)
+        const result = jsQR(imageData.data, imageData.width, imageData.height)
+
+        if (!result) {
+          setQrReaderMessage("No QR code was found in that image.")
+          return
+        }
+
+        setQrReaderResult(result.data)
+        setQrReaderMessage("QR code read successfully.")
+      } catch {
+        setQrReaderMessage("Could not read that image.")
+      }
+    }
+
+    return (
+      <div className="settings-page utility-page">
+        <button
+          className="utility-back-btn"
+          onClick={() => {
+            setActiveTool("home")
+          }}
+          type="button"
+        >
+          <ArrowLeft size={16} />
+          <span>Back</span>
+        </button>
+
+        <h1>QR Tools</h1>
+        <p className="page-subtitle">Create QR codes at the top and read them from image files below.</p>
+
+        <div className="settings-group">
+          <h3>QR Code Creator</h3>
+          <textarea
+            className="notepad-editor utility-json-editor"
+            onChange={(event) => setQrText(event.target.value)}
+            spellCheck={false}
+            value={qrText}
+          />
+          {qrMessage ? <p className="utility-message utility-message-error">{qrMessage}</p> : null}
+          <div className="settings-action-row">
+            <button
+              className="notepad-action-btn"
+              disabled={!qrDataUrl}
+              onClick={async () => {
+                const result = await window.hubAPI.utility.copyQrImage(qrDataUrl)
+                setQrMessage(result.success ? "QR image copied." : result.error || "Could not copy the QR image.")
+              }}
+              type="button"
+            >
+              Copy
+            </button>
+            <button
+              className="notepad-action-btn"
+              disabled={!qrDataUrl}
+              onClick={async () => {
+                const result = await window.hubAPI.utility.saveQrImage(qrDataUrl)
+                setQrMessage(result.success ? `Saved: ${result.path}` : result.error || "Could not save the QR image.")
+              }}
+              type="button"
+            >
+              Save
+            </button>
+          </div>
+          {qrDataUrl ? (
+            <div className="qr-tools-preview">
+              <img alt="Generated QR Code" className="qr-tools-image" src={qrDataUrl} />
+            </div>
+          ) : null}
+        </div>
+
+        <div className="settings-group">
+          <h3>QR Code Reader</h3>
+          <input
+            accept="image/*"
+            className="utility-input"
+            onChange={(event) => {
+              const file = event.target.files?.[0] || null
+              void readQrFromFile(file)
+            }}
+            type="file"
+          />
+          {qrReaderMessage ? (
+            <p className={`utility-message ${qrReaderResult ? "" : "utility-message-error"}`}>{qrReaderMessage}</p>
+          ) : null}
+          {qrReaderPreview ? (
+            <div className="qr-tools-preview">
+              <img alt="Selected QR source" className="qr-tools-image qr-tools-image-reader" src={qrReaderPreview} />
+            </div>
+          ) : null}
+          <pre className="utility-code-block utility-code-block-small">
+            {qrReaderResult || "Choose an image file to read its QR code."}
+          </pre>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="settings-page utility-page">
-      <h1>Utility Tools</h1>
-      <p className="page-subtitle">Small tools and helper utilities in one place.</p>
+      <div className="topbar">
+        <div>
+          <h1>Utility Tools</h1>
+          <p className="page-subtitle">Small tools and helper utilities in one place.</p>
+        </div>
+
+        <div className="home-search utility-search">
+          <Search size={16} />
+          <input
+            className="home-search-input"
+            onChange={(event) => setUtilitySearchQuery(event.target.value)}
+            placeholder="Search utility tools..."
+            type="text"
+            value={utilitySearchQuery}
+          />
+        </div>
+      </div>
 
       <div className="module-grid">
-        <button className="module-card" onClick={() => setActiveTool("file-manager")} type="button">
-          <div className="module-icon">
-            <FolderKanban size={22} />
-          </div>
-          <div className="module-info">
-            <h3>File Manager</h3>
-            <p>Browse and manage files from a dedicated utility page.</p>
-          </div>
-        </button>
-
-        <button className="module-card" onClick={() => setActiveTool("color-tools")} type="button">
-          <div className="module-icon">
-            <Palette size={22} />
-          </div>
-          <div className="module-info">
-            <h3>Color Tools</h3>
-            <p>Color conversion and palette helpers in one place.</p>
-          </div>
-        </button>
-
+        {filteredUtilityToolCards.map((tool) => (
+          <button className="module-card" key={tool.id} onClick={() => openUtilityTool(tool.id)} type="button">
+            <div className="module-icon">{tool.icon}</div>
+            <div className="module-info">
+              <h3>{tool.title}</h3>
+              <p>{tool.description}</p>
+            </div>
+          </button>
+        ))}
       </div>
+
+      {filteredUtilityToolCards.length === 0 ? (
+        <p className="home-search-empty">No utility tools matched your search.</p>
+      ) : null}
     </div>
   )
 }
@@ -4321,8 +5432,21 @@ function ModulePage() {
     return <TimerAlarmPage />
   }
 
+  if (moduleId === "calculator") {
+    return <CalculatorPage />
+  }
+
   if (moduleId === "utility-tools") {
     return <UtilityToolsPage />
+  }
+
+  if (moduleId === "pokenix-actions") {
+    return (
+      <div className="module-page">
+        <h1>Pokenix Actions</h1>
+        <p>Coming soon...</p>
+      </div>
+    )
   }
 
   if (pluginId) {
@@ -4362,6 +5486,7 @@ export default function App() {
   const [consoleIntroTimestamps, setConsoleIntroTimestamps] = useState<ConsoleIntroTimestamps>(
     createConsoleIntroTimestamps
   )
+  const [moduleRecency, setModuleRecency] = useState<ModuleId[]>([])
 
   const modules: ModuleItem[] = [
     {
@@ -4395,12 +5520,85 @@ export default function App() {
       icon: <Bell size={22} />
     },
     {
+      id: "calculator",
+      title: "Calculator",
+      description: "Handle quick calculations with a clean desktop calculator",
+      icon: <Calculator size={22} />
+    },
+    {
       id: "utility-tools",
       title: "Utility Tools",
       description: "Small tools and helper utilities",
-      icon: <Wrench size={22} />
+      badge: "Tool Collection",
+      icon: <Wrench size={22} />,
+      searchTerms: [
+        "file manager",
+        "color tools",
+        "json tools",
+        "markdown tools",
+        "directory structure",
+        "file watcher",
+        "create directories",
+        "move files",
+        "hex",
+        "rgb",
+        "hsl",
+        "markdown",
+        "json",
+        "qr",
+        "qr tools",
+        "qr code"
+      ]
+    },
+    {
+      id: "pokenix-actions",
+      title: "Pokenix Actions",
+      description: "Automations and action-based tools for future workflows",
+      icon: <Blocks size={22} />
     }
   ]
+
+  const sortedModules = useMemo(() => {
+    if (moduleRecency.length === 0) return modules
+
+    const priorityMap = new Map(moduleRecency.map((moduleId, index) => [moduleId, index]))
+
+    return [...modules].sort((left, right) => {
+      const leftPriority = priorityMap.get(left.id)
+      const rightPriority = priorityMap.get(right.id)
+
+      if (leftPriority === undefined && rightPriority === undefined) return 0
+      if (leftPriority === undefined) return 1
+      if (rightPriority === undefined) return -1
+
+      return leftPriority - rightPriority
+    })
+  }, [modules, moduleRecency])
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(MODULE_RECENCY_STORAGE_KEY)
+      if (!raw) return
+
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return
+
+      const validIds = parsed.filter((value): value is ModuleId => typeof value === "string")
+      setModuleRecency(validIds)
+    } catch {
+      setModuleRecency([])
+    }
+  }, [])
+
+  const openModule = (moduleId: ModuleId) => {
+    void window.hubAPI.modules.open(moduleId)
+
+    setModuleRecency((current) => {
+      const next = [moduleId, ...current.filter((item) => item !== moduleId)]
+      window.localStorage.setItem(MODULE_RECENCY_STORAGE_KEY, JSON.stringify(next))
+      return next
+    })
+  }
 
   useEffect(() => {
     const load = async () => {
@@ -4638,7 +5836,7 @@ export default function App() {
       </aside>
 
       <main className="main-content">
-        {page === "home" && <HomePage modules={modules} />}
+        {page === "home" && <HomePage modules={sortedModules} onOpenModule={openModule} />}
         {page === "plugins" && (
           <PluginsPage
             pluginsEnabled={pluginsEnabled}

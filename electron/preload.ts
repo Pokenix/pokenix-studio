@@ -18,7 +18,7 @@ const hubAPI = {
   },
 
   modules: {
-    open: (moduleId: "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "utility-tools") =>
+    open: (moduleId: "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "calculator" | "utility-tools" | "pokenix-actions") =>
       ipcRenderer.invoke("module:open", moduleId)
   },
 
@@ -165,6 +165,8 @@ const hubAPI = {
     counterSet: (value: number) => ipcRenderer.invoke("utility:counter-set", value),
     counterDeleteEntry: (entryId: string) => ipcRenderer.invoke("utility:counter-delete-entry", entryId),
     counterClear: () => ipcRenderer.invoke("utility:counter-clear"),
+    saveQrImage: (dataUrl: string) => ipcRenderer.invoke("utility:save-qr-image", dataUrl),
+    copyQrImage: (dataUrl: string) => ipcRenderer.invoke("utility:copy-qr-image", dataUrl),
     timerAlarmGet: () => ipcRenderer.invoke("utility:timer-alarm-get"),
     timerAlarmSet: (payload: { elapsed: number; laps: unknown[]; countdownRemaining: number; alarms: unknown[] }) =>
       ipcRenderer.invoke("utility:timer-alarm-set", payload)

@@ -2313,7 +2313,9 @@ function registerIpcHandlers() {
             counter: "Counter",
             clock: "Clock",
             "timer-alarm": "Timer & Alarm",
-            "utility-tools": "Utility Tools"
+            calculator: "Calculator",
+            "utility-tools": "Utility Tools",
+            "pokenix-actions": "Pokenix Actions"
         };
         const title = moduleMap[moduleId];
         if (!title) {
@@ -2866,6 +2868,57 @@ function registerIpcHandlers() {
             countdownRemaining: nextCountdownRemaining,
             alarms: nextAlarms
         };
+    });
+    electron_1.ipcMain.handle("utility:save-qr-image", async (event, dataUrl) => {
+        try {
+            const image = electron_1.nativeImage.createFromDataURL(dataUrl);
+            const buffer = image.toPNG();
+            const randomSuffix = Math.random().toString(36).slice(2, 14);
+            const parentWindow = electron_1.BrowserWindow.fromWebContents(event.sender);
+            const saveResult = parentWindow
+                ? await electron_1.dialog.showSaveDialog(parentWindow, {
+                    title: "Save QR Code",
+                    defaultPath: node_path_1.default.join(electron_1.app.getPath("desktop"), `Pokenix Studio QR ${randomSuffix}.png`),
+                    filters: [{ name: "PNG Image", extensions: ["png"] }]
+                })
+                : await electron_1.dialog.showSaveDialog({
+                    title: "Save QR Code",
+                    defaultPath: node_path_1.default.join(electron_1.app.getPath("desktop"), `Pokenix Studio QR ${randomSuffix}.png`),
+                    filters: [{ name: "PNG Image", extensions: ["png"] }]
+                });
+            if (saveResult.canceled || !saveResult.filePath) {
+                return {
+                    success: false,
+                    error: "Save cancelled."
+                };
+            }
+            await promises_1.default.writeFile(saveResult.filePath, buffer);
+            return {
+                success: true,
+                path: saveResult.filePath
+            };
+        }
+        catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : "Could not save QR image."
+            };
+        }
+    });
+    electron_1.ipcMain.handle("utility:copy-qr-image", async (_event, dataUrl) => {
+        try {
+            const image = electron_1.nativeImage.createFromDataURL(dataUrl);
+            electron_1.clipboard.writeImage(image);
+            return {
+                success: true
+            };
+        }
+        catch (error) {
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : "Could not copy QR image."
+            };
+        }
     });
     electron_1.ipcMain.handle("notepad:get-content", () => {
         const filePath = notesStore.get("notepadFilePath");

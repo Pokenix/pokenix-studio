@@ -103,6 +103,8 @@ const hubAPI = {
         counterSet: (value) => electron_1.ipcRenderer.invoke("utility:counter-set", value),
         counterDeleteEntry: (entryId) => electron_1.ipcRenderer.invoke("utility:counter-delete-entry", entryId),
         counterClear: () => electron_1.ipcRenderer.invoke("utility:counter-clear"),
+        saveQrImage: (dataUrl) => electron_1.ipcRenderer.invoke("utility:save-qr-image", dataUrl),
+        copyQrImage: (dataUrl) => electron_1.ipcRenderer.invoke("utility:copy-qr-image", dataUrl),
         timerAlarmGet: () => electron_1.ipcRenderer.invoke("utility:timer-alarm-get"),
         timerAlarmSet: (payload) => electron_1.ipcRenderer.invoke("utility:timer-alarm-set", payload)
     },

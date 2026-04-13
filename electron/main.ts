@@ -2963,7 +2963,9 @@ function registerIpcHandlers() {
       counter: "Counter",
       clock: "Clock",
       "timer-alarm": "Timer & Alarm",
-      "utility-tools": "Utility Tools"
+      calculator: "Calculator",
+      "utility-tools": "Utility Tools",
+      "pokenix-actions": "Pokenix Actions"
     }
 
     const title = moduleMap[moduleId]
@@ -3643,6 +3645,61 @@ function registerIpcHandlers() {
       }
     }
   )
+
+  ipcMain.handle("utility:save-qr-image", async (event, dataUrl: string) => {
+    try {
+      const image = nativeImage.createFromDataURL(dataUrl)
+      const buffer = image.toPNG()
+      const randomSuffix = Math.random().toString(36).slice(2, 14)
+      const parentWindow = BrowserWindow.fromWebContents(event.sender)
+      const saveResult = parentWindow
+        ? await dialog.showSaveDialog(parentWindow, {
+            title: "Save QR Code",
+            defaultPath: path.join(app.getPath("desktop"), `Pokenix Studio QR ${randomSuffix}.png`),
+            filters: [{ name: "PNG Image", extensions: ["png"] }]
+          })
+        : await dialog.showSaveDialog({
+            title: "Save QR Code",
+            defaultPath: path.join(app.getPath("desktop"), `Pokenix Studio QR ${randomSuffix}.png`),
+            filters: [{ name: "PNG Image", extensions: ["png"] }]
+          })
+
+      if (saveResult.canceled || !saveResult.filePath) {
+        return {
+          success: false,
+          error: "Save cancelled."
+        }
+      }
+
+      await fs.writeFile(saveResult.filePath, buffer)
+
+      return {
+        success: true,
+        path: saveResult.filePath
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Could not save QR image."
+      }
+    }
+  })
+
+  ipcMain.handle("utility:copy-qr-image", async (_event, dataUrl: string) => {
+    try {
+      const image = nativeImage.createFromDataURL(dataUrl)
+      clipboard.writeImage(image)
+
+      return {
+        success: true
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Could not copy QR image."
+      }
+    }
+  })
 
   ipcMain.handle("notepad:get-content", () => {
     const filePath = notesStore.get("notepadFilePath")
