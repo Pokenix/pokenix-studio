@@ -75,6 +75,8 @@ const defaultSettings = {
 let settingsStore;
 let notesStore;
 let todosStore;
+let counterStore;
+let timerAlarmStore;
 let windowStateStore;
 let pluginStore;
 async function movePathIfNeeded(oldPath, newPath) {
@@ -153,6 +155,24 @@ async function initStores() {
         defaults: {
             items: [],
             moveCompletedToBottom: true
+        }
+    });
+    counterStore = new Store({
+        cwd: getDataDirectory(),
+        name: "counter",
+        defaults: {
+            currentValue: 0,
+            history: []
+        }
+    });
+    timerAlarmStore = new Store({
+        cwd: getDataDirectory(),
+        name: "timer-alarm",
+        defaults: {
+            elapsed: 0,
+            laps: [],
+            countdownRemaining: 0,
+            alarms: []
         }
     });
     pluginStore = new Store({
@@ -2290,6 +2310,9 @@ function registerIpcHandlers() {
         const moduleMap = {
             notepad: "Notepad",
             "todo-list": "To-Do List",
+            counter: "Counter",
+            clock: "Clock",
+            "timer-alarm": "Timer & Alarm",
             "utility-tools": "Utility Tools"
         };
         const title = moduleMap[moduleId];
@@ -2748,6 +2771,100 @@ function registerIpcHandlers() {
         return {
             success: true,
             transferred
+        };
+    });
+    electron_1.ipcMain.handle("utility:counter-get", async () => {
+        return {
+            currentValue: counterStore.get("currentValue"),
+            history: counterStore.get("history")
+        };
+    });
+    electron_1.ipcMain.handle("utility:counter-increment", async () => {
+        const nextValue = counterStore.get("currentValue") + 1;
+        counterStore.set("currentValue", nextValue);
+        return {
+            currentValue: nextValue,
+            history: counterStore.get("history")
+        };
+    });
+    electron_1.ipcMain.handle("utility:counter-save", async () => {
+        const nextItem = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            value: counterStore.get("currentValue"),
+            timestamp: new Date().toLocaleString("tr-TR", {
+                day: "2-digit",
+                month: "2-digit",
+                year: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+                hour12: false
+            })
+        };
+        const nextHistory = [nextItem, ...counterStore.get("history")];
+        counterStore.set("history", nextHistory);
+        return {
+            currentValue: counterStore.get("currentValue"),
+            history: nextHistory
+        };
+    });
+    electron_1.ipcMain.handle("utility:counter-set", async (_event, value) => {
+        const normalizedValue = Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+        counterStore.set("currentValue", normalizedValue);
+        return {
+            currentValue: normalizedValue,
+            history: counterStore.get("history")
+        };
+    });
+    electron_1.ipcMain.handle("utility:counter-delete-entry", async (_event, entryId) => {
+        const nextHistory = counterStore.get("history").filter((item) => item.id !== entryId);
+        counterStore.set("history", nextHistory);
+        return {
+            currentValue: counterStore.get("currentValue"),
+            history: nextHistory
+        };
+    });
+    electron_1.ipcMain.handle("utility:counter-clear", async () => {
+        counterStore.set("currentValue", 0);
+        counterStore.set("history", []);
+        return {
+            currentValue: 0,
+            history: []
+        };
+    });
+    electron_1.ipcMain.handle("utility:timer-alarm-get", async () => {
+        const alarms = timerAlarmStore.get("alarms").map((alarm) => ({
+            ...alarm,
+            dismissed: Boolean(alarm.dismissed)
+        }));
+        return {
+            elapsed: timerAlarmStore.get("elapsed"),
+            laps: timerAlarmStore.get("laps"),
+            countdownRemaining: timerAlarmStore.get("countdownRemaining"),
+            alarms
+        };
+    });
+    electron_1.ipcMain.handle("utility:timer-alarm-set", async (_event, payload) => {
+        const nextElapsed = Number.isFinite(payload.elapsed) ? Math.max(0, Math.trunc(payload.elapsed)) : 0;
+        const nextLaps = Array.isArray(payload.laps) ? payload.laps : [];
+        const nextCountdownRemaining = Number.isFinite(payload.countdownRemaining)
+            ? Math.max(0, Math.trunc(payload.countdownRemaining))
+            : 0;
+        const nextAlarms = Array.isArray(payload.alarms)
+            ? payload.alarms.map((alarm) => ({
+                ...alarm,
+                dismissed: Boolean(alarm.dismissed)
+            }))
+            : [];
+        timerAlarmStore.set("elapsed", nextElapsed);
+        timerAlarmStore.set("laps", nextLaps);
+        timerAlarmStore.set("countdownRemaining", nextCountdownRemaining);
+        timerAlarmStore.set("alarms", nextAlarms);
+        return {
+            elapsed: nextElapsed,
+            laps: nextLaps,
+            countdownRemaining: nextCountdownRemaining,
+            alarms: nextAlarms
         };
     });
     electron_1.ipcMain.handle("notepad:get-content", () => {

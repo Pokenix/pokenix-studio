@@ -96,7 +96,15 @@ const hubAPI = {
         validateDirectoryName: (name) => electron_1.ipcRenderer.invoke("utility:validate-directory-name", name),
         createDirectories: (basePath, directories) => electron_1.ipcRenderer.invoke("utility:create-directories", basePath, directories),
         checkTransferConflicts: (oldPath, newPath) => electron_1.ipcRenderer.invoke("utility:check-transfer-conflicts", oldPath, newPath),
-        transferFiles: (oldPath, newPath, mode, replaceExisting, deleteOldDirectory) => electron_1.ipcRenderer.invoke("utility:transfer-files", oldPath, newPath, mode, replaceExisting, deleteOldDirectory)
+        transferFiles: (oldPath, newPath, mode, replaceExisting, deleteOldDirectory) => electron_1.ipcRenderer.invoke("utility:transfer-files", oldPath, newPath, mode, replaceExisting, deleteOldDirectory),
+        counterGet: () => electron_1.ipcRenderer.invoke("utility:counter-get"),
+        counterIncrement: () => electron_1.ipcRenderer.invoke("utility:counter-increment"),
+        counterSave: () => electron_1.ipcRenderer.invoke("utility:counter-save"),
+        counterSet: (value) => electron_1.ipcRenderer.invoke("utility:counter-set", value),
+        counterDeleteEntry: (entryId) => electron_1.ipcRenderer.invoke("utility:counter-delete-entry", entryId),
+        counterClear: () => electron_1.ipcRenderer.invoke("utility:counter-clear"),
+        timerAlarmGet: () => electron_1.ipcRenderer.invoke("utility:timer-alarm-get"),
+        timerAlarmSet: (payload) => electron_1.ipcRenderer.invoke("utility:timer-alarm-set", payload)
     },
     notepad: {
         getContent: () => electron_1.ipcRenderer.invoke("notepad:get-content"),

@@ -1,5 +1,5 @@
 import "./index.css"
-import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo } from "lucide-react"
+import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo, Hash, X, Clock3, Bell } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 type Page = "home" | "plugins" | "themes" | "hub" | "settings" | "console"
@@ -13,7 +13,7 @@ type AppSettings = {
   developerMode: boolean
 }
 
-type ModuleId = "notepad" | "todo-list" | "utility-tools"
+type ModuleId = "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "utility-tools"
 
 type ModuleItem = {
   id: ModuleId
@@ -122,19 +122,31 @@ type RgbColor = {
   b: number
 }
 
-type EyeDropperResult = {
-  sRGBHex: string
-}
-
-type EyeDropperConstructor = new () => {
-  open: () => Promise<EyeDropperResult>
-}
-
 type TodoItem = {
   id: string
   text: string
   completed: boolean
   createdAt: number
+}
+
+type CounterHistoryItem = {
+  id: string
+  value: number
+  timestamp: string
+}
+
+type TimerLapItem = {
+  id: string
+  label: string
+  value: string
+}
+
+type AlarmItem = {
+  id: string
+  time: string
+  target: number
+  ringing: boolean
+  dismissed: boolean
 }
 
 declare global {
@@ -236,6 +248,19 @@ declare global {
           replaceExisting: boolean,
           deleteOldDirectory: boolean
         ) => Promise<{ success: boolean; transferred?: string[]; conflicts?: TransferConflict[]; error?: string }>
+        counterGet: () => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
+        counterIncrement: () => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
+        counterSave: () => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
+        counterSet: (value: number) => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
+        counterDeleteEntry: (entryId: string) => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
+        counterClear: () => Promise<{ currentValue: number; history: CounterHistoryItem[] }>
+        timerAlarmGet: () => Promise<{ elapsed: number; laps: TimerLapItem[]; countdownRemaining: number; alarms: AlarmItem[] }>
+        timerAlarmSet: (payload: {
+          elapsed: number
+          laps: TimerLapItem[]
+          countdownRemaining: number
+          alarms: AlarmItem[]
+        }) => Promise<{ elapsed: number; laps: TimerLapItem[]; countdownRemaining: number; alarms: AlarmItem[] }>
       }
       notepad: {
         getContent: () => Promise<NotepadContentResponse>
@@ -1130,6 +1155,706 @@ function TodoListPage() {
   )
 }
 
+function CounterPage() {
+  const [counterValue, setCounterValue] = useState(0)
+  const [counterHistory, setCounterHistory] = useState<CounterHistoryItem[]>([])
+
+  useEffect(() => {
+    void window.hubAPI.utility.counterGet().then((result) => {
+      setCounterValue(result.currentValue)
+      setCounterHistory(result.history)
+    })
+  }, [])
+
+  return (
+    <div className="settings-page utility-page">
+      <h1>Counter</h1>
+      <p className="page-subtitle">Count, save snapshots, and keep a simple running history.</p>
+
+      <div className="settings-group counter-group">
+        <div className="counter-row">
+          <button
+            className="counter-big-button"
+            onClick={() => {
+              void window.hubAPI.utility.counterIncrement().then((result) => {
+                setCounterValue(result.currentValue)
+                setCounterHistory(result.history)
+              })
+            }}
+            type="button"
+          >
+            Count
+          </button>
+
+          <div className="counter-value">{counterValue}</div>
+        </div>
+
+        <div className="settings-action-row">
+          <button
+            className="notepad-action-btn"
+            onClick={() => {
+              void window.hubAPI.utility.counterSave().then((result) => {
+                setCounterValue(result.currentValue)
+                setCounterHistory(result.history)
+              })
+            }}
+            type="button"
+          >
+            Save Current Value
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-group">
+        <h3>Saved History</h3>
+        {counterHistory.length === 0 ? (
+          <p>No saved entries yet.</p>
+        ) : (
+          <div className="utility-list">
+            {counterHistory.map((item) => (
+              <div key={item.id} className="utility-list-item">
+                <div className="counter-history-item">
+                  <span>{item.value}</span>
+                  <span>{item.timestamp}</span>
+                </div>
+
+                <button
+                  aria-label={`Delete saved value ${item.value}`}
+                  className="counter-delete-btn"
+                  onClick={() => {
+                    void window.hubAPI.utility.counterDeleteEntry(item.id).then((result) => {
+                      setCounterValue(result.currentValue)
+                      setCounterHistory(result.history)
+                    })
+                  }}
+                  type="button"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="settings-group">
+        <div className="settings-action-row">
+          <button
+            className="notepad-clear-btn"
+            onClick={() => {
+              void window.hubAPI.utility.counterClear().then((result) => {
+                setCounterValue(result.currentValue)
+                setCounterHistory(result.history)
+              })
+            }}
+            type="button"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ClockPage() {
+  const [now, setNow] = useState(() => new Date())
+  const systemLocale = useMemo(() => navigator.language || undefined, [])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNow(new Date())
+    }, 50)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [])
+
+  const dateText = now.toLocaleDateString(systemLocale, {
+    weekday: "long",
+    day: "2-digit",
+    month: "long",
+    year: "numeric"
+  })
+
+  const timeText = now.toLocaleTimeString(systemLocale, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  })
+
+  return (
+    <div className="clock-page">
+      <div className="clock-panel">
+        <p className="clock-date">{dateText}</p>
+        <h1 className="clock-time">{timeText}</h1>
+      </div>
+    </div>
+  )
+}
+
+function formatTimerDisplay(totalMilliseconds: number) {
+  const clamped = Math.max(0, totalMilliseconds)
+  const totalSeconds = Math.floor(clamped / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const hundredths = Math.floor((clamped % 1000) / 10)
+
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(hundredths).padStart(2, "0")}`
+}
+
+function splitMillisecondsToClockParts(totalMilliseconds: number) {
+  const clamped = Math.max(0, totalMilliseconds)
+  const totalSeconds = Math.floor(clamped / 1000)
+
+  return {
+    hours: String(Math.floor(totalSeconds / 3600)).padStart(2, "0"),
+    minutes: String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0"),
+    seconds: String(totalSeconds % 60).padStart(2, "0")
+  }
+}
+
+function clockPartsToMilliseconds(hours: string, minutes: string, seconds: string) {
+  const parsedHours = Math.max(0, Number.parseInt(hours || "0", 10) || 0)
+  const parsedMinutes = Math.max(0, Number.parseInt(minutes || "0", 10) || 0)
+  const parsedSeconds = Math.max(0, Number.parseInt(seconds || "0", 10) || 0)
+
+  return (parsedHours * 3600 + parsedMinutes * 60 + parsedSeconds) * 1000
+}
+
+function getNextAlarmTimestamp(value: string) {
+  const [hourText, minuteText] = value.split(":")
+  const hours = Number.parseInt(hourText || "", 10)
+  const minutes = Number.parseInt(minuteText || "", 10)
+
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) {
+    return null
+  }
+
+  const now = new Date()
+  const next = new Date()
+  next.setHours(hours, minutes, 0, 0)
+
+  if (next.getTime() <= now.getTime()) {
+    next.setDate(next.getDate() + 1)
+  }
+
+  return next.getTime()
+}
+
+function TimerAlarmPage() {
+  const [stopwatchRunning, setStopwatchRunning] = useState(false)
+  const [stopwatchElapsed, setStopwatchElapsed] = useState(0)
+  const [stopwatchLaps, setStopwatchLaps] = useState<TimerLapItem[]>([])
+  const [countdownRunning, setCountdownRunning] = useState(false)
+  const [countdownRemaining, setCountdownRemaining] = useState(0)
+  const [countdownHours, setCountdownHours] = useState("00")
+  const [countdownMinutes, setCountdownMinutes] = useState("00")
+  const [countdownSeconds, setCountdownSeconds] = useState("00")
+  const [countdownRinging, setCountdownRinging] = useState(false)
+  const [alarmTime, setAlarmTime] = useState("")
+  const [alarms, setAlarms] = useState<AlarmItem[]>([])
+  const [timerAlarmLoaded, setTimerAlarmLoaded] = useState(false)
+  const [alarmMessage, setAlarmMessage] = useState("")
+  const stopwatchStartedAtRef = useRef<number | null>(null)
+  const countdownTargetRef = useRef<number | null>(null)
+  const alarmAudioContextRef = useRef<AudioContext | null>(null)
+  const alarmIntervalRef = useRef<number | null>(null)
+
+  const stopAlarmPlayback = () => {
+    if (alarmIntervalRef.current) {
+      window.clearInterval(alarmIntervalRef.current)
+      alarmIntervalRef.current = null
+    }
+
+    if (alarmAudioContextRef.current && alarmAudioContextRef.current.state === "running") {
+      void alarmAudioContextRef.current.suspend()
+    }
+  }
+
+  useEffect(() => {
+    void window.hubAPI.utility.timerAlarmGet().then((result) => {
+      setStopwatchElapsed(result.elapsed)
+      setStopwatchLaps(result.laps)
+      setCountdownRemaining(result.countdownRemaining)
+      const countdownParts = splitMillisecondsToClockParts(result.countdownRemaining)
+      setCountdownHours(countdownParts.hours)
+      setCountdownMinutes(countdownParts.minutes)
+      setCountdownSeconds(countdownParts.seconds)
+      setAlarms(result.alarms)
+      setTimerAlarmLoaded(true)
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!timerAlarmLoaded) return
+
+    if (stopwatchRunning || countdownRunning) return
+
+    void window.hubAPI.utility.timerAlarmSet({
+      elapsed: stopwatchElapsed,
+      laps: stopwatchLaps,
+      countdownRemaining,
+      alarms
+    })
+  }, [stopwatchElapsed, stopwatchLaps, countdownRemaining, alarms, timerAlarmLoaded, stopwatchRunning, countdownRunning])
+
+  useEffect(() => {
+    if (!stopwatchRunning) return
+
+    const interval = window.setInterval(() => {
+      const startedAt = stopwatchStartedAtRef.current
+      if (!startedAt) return
+      setStopwatchElapsed(Date.now() - startedAt)
+    }, 25)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [stopwatchRunning])
+
+  useEffect(() => {
+    if (!countdownRunning) return
+
+    const interval = window.setInterval(() => {
+      const target = countdownTargetRef.current
+      if (!target) return
+
+      const nextRemaining = Math.max(0, target - Date.now())
+      setCountdownRemaining(nextRemaining)
+
+      if (nextRemaining === 0) {
+        countdownTargetRef.current = null
+        setCountdownRunning(false)
+        setCountdownRinging(true)
+      }
+    }, 25)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [countdownRunning])
+
+  useEffect(() => {
+    if (alarms.length === 0) return
+
+    const interval = window.setInterval(() => {
+      const now = Date.now()
+
+      setAlarms((current) =>
+        current.map((alarm) =>
+          !alarm.ringing && !alarm.dismissed && alarm.target <= now ? { ...alarm, ringing: true } : alarm
+        )
+      )
+    }, 250)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [alarms.length])
+
+  useEffect(() => {
+    if (!alarms.some((alarm) => alarm.ringing) && !countdownRinging) return
+
+    const playBeep = () => {
+      const audioContext =
+        alarmAudioContextRef.current ||
+        new window.AudioContext()
+
+      alarmAudioContextRef.current = audioContext
+
+      const oscillator = audioContext.createOscillator()
+      const gain = audioContext.createGain()
+
+      oscillator.type = "sine"
+      oscillator.frequency.value = 880
+      gain.gain.setValueAtTime(0.0001, audioContext.currentTime)
+      gain.gain.exponentialRampToValueAtTime(0.18, audioContext.currentTime + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.28)
+
+      oscillator.connect(gain)
+      gain.connect(audioContext.destination)
+
+      oscillator.start()
+      oscillator.stop(audioContext.currentTime + 0.3)
+    }
+
+    void alarmAudioContextRef.current?.resume()
+    playBeep()
+    alarmIntervalRef.current = window.setInterval(playBeep, 650)
+
+    return () => {
+      stopAlarmPlayback()
+    }
+  }, [alarms, countdownRinging])
+
+  useEffect(() => {
+    return () => {
+      if (alarmIntervalRef.current) {
+        window.clearInterval(alarmIntervalRef.current)
+      }
+
+      if (alarmAudioContextRef.current) {
+        void alarmAudioContextRef.current.close()
+      }
+    }
+  }, [])
+
+  const startStopwatch = () => {
+    stopwatchStartedAtRef.current = Date.now() - stopwatchElapsed
+    setStopwatchRunning(true)
+  }
+
+  const pauseStopwatch = () => {
+    const startedAt = stopwatchStartedAtRef.current
+    if (startedAt) {
+      setStopwatchElapsed(Date.now() - startedAt)
+    }
+
+    stopwatchStartedAtRef.current = null
+    setStopwatchRunning(false)
+  }
+
+  const resetStopwatch = () => {
+    stopwatchStartedAtRef.current = null
+    setStopwatchRunning(false)
+    setStopwatchElapsed(0)
+    setStopwatchLaps([])
+  }
+
+  const addStopwatchLap = () => {
+    if (stopwatchElapsed <= 0) return
+
+    setStopwatchLaps((current) => [
+      {
+        id: `${Date.now()}-${current.length + 1}`,
+        label: `Lap ${current.length + 1}`,
+        value: formatTimerDisplay(stopwatchElapsed)
+      },
+      ...current
+    ])
+  }
+
+  const updateCountdownInputs = (channel: "hours" | "minutes" | "seconds", nextValue: string) => {
+    const sanitized = nextValue.replace(/\D/g, "").slice(0, 2)
+
+    const nextHours = channel === "hours" ? sanitized : countdownHours
+    const nextMinutes = channel === "minutes" ? sanitized : countdownMinutes
+    const nextSeconds = channel === "seconds" ? sanitized : countdownSeconds
+
+    if (channel === "hours") setCountdownHours(sanitized)
+    if (channel === "minutes") setCountdownMinutes(sanitized)
+    if (channel === "seconds") setCountdownSeconds(sanitized)
+
+    if (!countdownRunning) {
+      setCountdownRemaining(clockPartsToMilliseconds(nextHours, nextMinutes, nextSeconds))
+    }
+  }
+
+  const startCountdown = () => {
+    if (countdownRemaining <= 0) return
+
+    countdownTargetRef.current = Date.now() + countdownRemaining
+    setCountdownRinging(false)
+    setCountdownRunning(true)
+  }
+
+  const pauseCountdown = () => {
+    const target = countdownTargetRef.current
+    if (target) {
+      const nextRemaining = Math.max(0, target - Date.now())
+      setCountdownRemaining(nextRemaining)
+      const nextParts = splitMillisecondsToClockParts(nextRemaining)
+      setCountdownHours(nextParts.hours)
+      setCountdownMinutes(nextParts.minutes)
+      setCountdownSeconds(nextParts.seconds)
+    }
+
+    countdownTargetRef.current = null
+    setCountdownRunning(false)
+  }
+
+  const resetCountdown = () => {
+    countdownTargetRef.current = null
+    setCountdownRunning(false)
+    setCountdownRinging(false)
+    setCountdownRemaining(0)
+    setCountdownHours("00")
+    setCountdownMinutes("00")
+    setCountdownSeconds("00")
+  }
+
+  const setAlarm = () => {
+    const nextAlarm = getNextAlarmTimestamp(alarmTime)
+    if (!nextAlarm) return
+
+    const alreadyExists = alarms.some((alarm) => alarm.time === alarmTime)
+    if (alreadyExists) {
+      setAlarmMessage("An alarm already exists for that time.")
+      return
+    }
+
+    setAlarms((current) => [
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        time: alarmTime,
+        target: nextAlarm,
+        ringing: false,
+        dismissed: false
+      },
+      ...current
+    ])
+    setAlarmTime("")
+    setAlarmMessage("")
+  }
+
+  const stopAlarmSound = (alarmId?: string) => {
+    if (!alarmId) {
+      stopAlarmPlayback()
+      return
+    }
+
+    const nextAlarms = alarms.map((alarm) =>
+      alarm.id === alarmId ? { ...alarm, ringing: false, dismissed: true } : alarm
+    )
+    setAlarms(nextAlarms)
+
+    if (!nextAlarms.some((alarm) => alarm.ringing)) {
+      stopAlarmPlayback()
+    }
+  }
+
+  const sortedAlarms = useMemo(
+    () =>
+      [...alarms].sort((left, right) => {
+        if (left.ringing !== right.ringing) {
+          return left.ringing ? -1 : 1
+        }
+
+        if (left.dismissed !== right.dismissed) {
+          return left.dismissed ? 1 : -1
+        }
+
+        return left.time.localeCompare(right.time)
+      }),
+    [alarms]
+  )
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      const finalElapsed =
+        stopwatchRunning && stopwatchStartedAtRef.current
+          ? Date.now() - stopwatchStartedAtRef.current
+          : stopwatchElapsed
+      const finalCountdownRemaining =
+        countdownRunning && countdownTargetRef.current
+          ? Math.max(0, countdownTargetRef.current - Date.now())
+          : countdownRemaining
+
+      void window.hubAPI.utility.timerAlarmSet({
+        elapsed: finalElapsed,
+        laps: stopwatchLaps,
+        countdownRemaining: finalCountdownRemaining,
+        alarms
+      })
+    }
+
+    window.addEventListener("beforeunload", handleBeforeUnload)
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload)
+    }
+  }, [stopwatchRunning, stopwatchElapsed, stopwatchLaps, countdownRunning, countdownRemaining, alarms])
+
+  return (
+    <div className="settings-page timer-alarm-page">
+      <h1>Timer & Alarm</h1>
+      <p className="page-subtitle">Run a live timer with laps and set a simple alarm with sound.</p>
+
+      <div className="settings-group timer-panel">
+        <h3>Stop Watch</h3>
+        <div className="timer-display">{formatTimerDisplay(stopwatchElapsed)}</div>
+
+        <div className="settings-action-row">
+          <button className="notepad-action-btn" onClick={stopwatchRunning ? pauseStopwatch : startStopwatch} type="button">
+            {stopwatchRunning ? "Pause" : "Start"}
+          </button>
+          <button className="notepad-action-btn" disabled={stopwatchElapsed <= 0} onClick={addStopwatchLap} type="button">
+            Lap
+          </button>
+          <button className="notepad-clear-btn" disabled={stopwatchElapsed <= 0 && stopwatchLaps.length === 0} onClick={resetStopwatch} type="button">
+            Reset
+          </button>
+        </div>
+
+        <div className="settings-group timer-laps-group">
+          <h3>Laps</h3>
+          {stopwatchLaps.length === 0 ? (
+            <p>No laps yet.</p>
+          ) : (
+            <div className="utility-list">
+              {stopwatchLaps.map((lap) => (
+                <div key={lap.id} className="utility-list-item">
+                  <span>{lap.label}</span>
+                  <span>{lap.value}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="settings-group timer-panel">
+        <h3>Timer</h3>
+        <div className="timer-display">{formatTimerDisplay(countdownRemaining)}</div>
+
+        <div className="utility-split-inputs">
+          <input
+            className="settings-text-input"
+            inputMode="numeric"
+            onChange={(event) => updateCountdownInputs("hours", event.target.value)}
+            placeholder="HH"
+            type="text"
+            value={countdownHours}
+          />
+          <input
+            className="settings-text-input"
+            inputMode="numeric"
+            onChange={(event) => updateCountdownInputs("minutes", event.target.value)}
+            placeholder="MM"
+            type="text"
+            value={countdownMinutes}
+          />
+          <input
+            className="settings-text-input"
+            inputMode="numeric"
+            onChange={(event) => updateCountdownInputs("seconds", event.target.value)}
+            placeholder="SS"
+            type="text"
+            value={countdownSeconds}
+          />
+        </div>
+
+        <div className="settings-action-row">
+          <button className="notepad-action-btn" disabled={countdownRemaining <= 0 && !countdownRunning} onClick={countdownRunning ? pauseCountdown : startCountdown} type="button">
+            {countdownRunning ? "Pause" : "Start"}
+          </button>
+          <button className="notepad-clear-btn" disabled={countdownRemaining <= 0 && !countdownRinging} onClick={resetCountdown} type="button">
+            Reset
+          </button>
+          {countdownRinging ? (
+            <button
+              className="notepad-action-btn"
+              onClick={() => {
+                setCountdownRinging(false)
+                stopAlarmPlayback()
+              }}
+              type="button"
+            >
+              Stop
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="settings-group timer-panel">
+        <h3>Alarm</h3>
+        <div className="timer-alarm-row">
+          <input
+            className="settings-text-input timer-alarm-input"
+            onChange={(event) => setAlarmTime(event.target.value)}
+            type="time"
+            value={alarmTime}
+          />
+
+          <button
+            className="notepad-action-btn"
+            disabled={!alarmTime}
+            onClick={setAlarm}
+            type="button"
+          >
+            Set Alarm
+          </button>
+
+          <button
+            className="notepad-clear-btn"
+            disabled={alarms.length === 0}
+            onClick={() => {
+              stopAlarmSound()
+              setAlarms([])
+            }}
+            type="button"
+          >
+            Clear All
+          </button>
+        </div>
+
+        {alarmMessage ? <p className="utility-error">{alarmMessage}</p> : null}
+
+        {sortedAlarms.length === 0 ? (
+          <p>No alarms set.</p>
+        ) : (
+          <div className="utility-list">
+            {sortedAlarms.map((alarm) => (
+              <div key={alarm.id} className="utility-list-item">
+                <div className="counter-history-item">
+                  <span>{alarm.time}</span>
+                  <span>
+                    {alarm.ringing
+                      ? "Ringing"
+                      : alarm.dismissed
+                        ? "Completed"
+                      : new Date(alarm.target).toLocaleString(navigator.language || undefined, {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                          year: "numeric",
+                          month: "short",
+                          day: "2-digit"
+                        })}
+                  </span>
+                </div>
+
+                {alarm.ringing ? (
+                  <button
+                    className="notepad-action-btn"
+                    onClick={() => {
+                      stopAlarmSound(alarm.id)
+                    }}
+                    type="button"
+                  >
+                    Stop
+                  </button>
+                ) : null}
+
+                <button
+                  aria-label={`Delete alarm ${alarm.time}`}
+                  className="counter-delete-btn"
+                  onClick={() => {
+                    const wasRinging = alarm.ringing
+                    setAlarms((current) => current.filter((item) => item.id !== alarm.id))
+
+                    if (wasRinging) {
+                      window.setTimeout(() => {
+                        stopAlarmSound()
+                      }, 0)
+                    }
+                  }}
+                  type="button"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function UtilityToolsPage() {
   const [activeTool, setActiveTool] = useState<"home" | "file-manager" | "color-tools">("home")
   const [activeFileManagerTool, setActiveFileManagerTool] = useState<
@@ -1268,20 +1993,7 @@ function UtilityToolsPage() {
     setColorMessage("")
   }
 
-  const openColorPicker = async () => {
-    const eyeDropper = (window as Window & { EyeDropper?: EyeDropperConstructor }).EyeDropper
-
-    if (typeof eyeDropper === "function") {
-      try {
-        const picker = new eyeDropper()
-        const result = await picker.open()
-        syncHexValue(result.sRGBHex)
-        return
-      } catch {
-        return
-      }
-    }
-
+  const openColorPicker = () => {
     colorPickerRef.current?.click()
   }
 
@@ -2177,6 +2889,7 @@ function UtilityToolsPage() {
             <p>Color conversion and palette helpers in one place.</p>
           </div>
         </button>
+
       </div>
     </div>
   )
@@ -3596,6 +4309,18 @@ function ModulePage() {
     return <TodoListPage />
   }
 
+  if (moduleId === "counter") {
+    return <CounterPage />
+  }
+
+  if (moduleId === "clock") {
+    return <ClockPage />
+  }
+
+  if (moduleId === "timer-alarm") {
+    return <TimerAlarmPage />
+  }
+
   if (moduleId === "utility-tools") {
     return <UtilityToolsPage />
   }
@@ -3650,6 +4375,24 @@ export default function App() {
       title: "To-Do List",
       description: "Track tasks and keep a simple checklist",
       icon: <ListTodo size={22} />
+    },
+    {
+      id: "counter",
+      title: "Counter",
+      description: "Count, save snapshots, and keep a running history",
+      icon: <Hash size={22} />
+    },
+    {
+      id: "clock",
+      title: "Clock",
+      description: "A clean live clock with date, seconds, and milliseconds",
+      icon: <Clock3 size={22} />
+    },
+    {
+      id: "timer-alarm",
+      title: "Timer & Alarm",
+      description: "Use a live timer with laps and set simple sound alarms",
+      icon: <Bell size={22} />
     },
     {
       id: "utility-tools",

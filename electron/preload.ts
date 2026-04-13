@@ -18,7 +18,7 @@ const hubAPI = {
   },
 
   modules: {
-    open: (moduleId: "notepad" | "todo-list" | "utility-tools") =>
+    open: (moduleId: "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "utility-tools") =>
       ipcRenderer.invoke("module:open", moduleId)
   },
 
@@ -158,7 +158,16 @@ const hubAPI = {
         mode,
         replaceExisting,
         deleteOldDirectory
-      )
+      ),
+    counterGet: () => ipcRenderer.invoke("utility:counter-get"),
+    counterIncrement: () => ipcRenderer.invoke("utility:counter-increment"),
+    counterSave: () => ipcRenderer.invoke("utility:counter-save"),
+    counterSet: (value: number) => ipcRenderer.invoke("utility:counter-set", value),
+    counterDeleteEntry: (entryId: string) => ipcRenderer.invoke("utility:counter-delete-entry", entryId),
+    counterClear: () => ipcRenderer.invoke("utility:counter-clear"),
+    timerAlarmGet: () => ipcRenderer.invoke("utility:timer-alarm-get"),
+    timerAlarmSet: (payload: { elapsed: number; laps: unknown[]; countdownRemaining: number; alarms: unknown[] }) =>
+      ipcRenderer.invoke("utility:timer-alarm-set", payload)
   },
 
   notepad: {

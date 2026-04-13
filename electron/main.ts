@@ -72,6 +72,38 @@ type TodosStore = {
   moveCompletedToBottom: boolean
 }
 
+type CounterHistoryItem = {
+  id: string
+  value: number
+  timestamp: string
+}
+
+type CounterStore = {
+  currentValue: number
+  history: CounterHistoryItem[]
+}
+
+type TimerLapStoreItem = {
+  id: string
+  label: string
+  value: string
+}
+
+type AlarmStoreItem = {
+  id: string
+  time: string
+  target: number
+  ringing: boolean
+  dismissed: boolean
+}
+
+type TimerAlarmStore = {
+  elapsed: number
+  laps: TimerLapStoreItem[]
+  countdownRemaining: number
+  alarms: AlarmStoreItem[]
+}
+
 type PluginStore = {
   pluginsEnabled: boolean
   disabledPluginIds: string[]
@@ -182,6 +214,8 @@ const defaultSettings: SettingsStore = {
 let settingsStore: StoreLike<SettingsStore>
 let notesStore: StoreLike<NotesStore>
 let todosStore: StoreLike<TodosStore>
+let counterStore: StoreLike<CounterStore>
+let timerAlarmStore: StoreLike<TimerAlarmStore>
 let windowStateStore: StoreLike<WindowStateStore>
 let pluginStore: StoreLike<PluginStore>
 
@@ -272,6 +306,26 @@ async function initStores() {
       moveCompletedToBottom: true
     }
   }) as StoreLike<TodosStore>
+
+  counterStore = new Store<CounterStore>({
+    cwd: getDataDirectory(),
+    name: "counter",
+    defaults: {
+      currentValue: 0,
+      history: []
+    }
+  }) as StoreLike<CounterStore>
+
+  timerAlarmStore = new Store<TimerAlarmStore>({
+    cwd: getDataDirectory(),
+    name: "timer-alarm",
+    defaults: {
+      elapsed: 0,
+      laps: [],
+      countdownRemaining: 0,
+      alarms: []
+    }
+  }) as StoreLike<TimerAlarmStore>
 
   pluginStore = new Store<PluginStore>({
     cwd: getSettingsDirectory(),
@@ -2906,6 +2960,9 @@ function registerIpcHandlers() {
     const moduleMap: Record<string, string> = {
       notepad: "Notepad",
       "todo-list": "To-Do List",
+      counter: "Counter",
+      clock: "Clock",
+      "timer-alarm": "Timer & Alarm",
       "utility-tools": "Utility Tools"
     }
 
@@ -3461,6 +3518,128 @@ function registerIpcHandlers() {
       return {
         success: true,
         transferred
+      }
+    }
+  )
+
+  ipcMain.handle("utility:counter-get", async () => {
+    return {
+      currentValue: counterStore.get("currentValue"),
+      history: counterStore.get("history")
+    }
+  })
+
+  ipcMain.handle("utility:counter-increment", async () => {
+    const nextValue = counterStore.get("currentValue") + 1
+    counterStore.set("currentValue", nextValue)
+
+    return {
+      currentValue: nextValue,
+      history: counterStore.get("history")
+    }
+  })
+
+  ipcMain.handle("utility:counter-save", async () => {
+    const nextItem: CounterHistoryItem = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      value: counterStore.get("currentValue"),
+      timestamp: new Date().toLocaleString("tr-TR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+      })
+    }
+
+    const nextHistory = [nextItem, ...counterStore.get("history")]
+    counterStore.set("history", nextHistory)
+
+    return {
+      currentValue: counterStore.get("currentValue"),
+      history: nextHistory
+    }
+  })
+
+  ipcMain.handle("utility:counter-set", async (_event, value: number) => {
+    const normalizedValue = Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0
+    counterStore.set("currentValue", normalizedValue)
+
+    return {
+      currentValue: normalizedValue,
+      history: counterStore.get("history")
+    }
+  })
+
+  ipcMain.handle("utility:counter-delete-entry", async (_event, entryId: string) => {
+    const nextHistory = counterStore.get("history").filter((item) => item.id !== entryId)
+    counterStore.set("history", nextHistory)
+
+    return {
+      currentValue: counterStore.get("currentValue"),
+      history: nextHistory
+    }
+  })
+
+  ipcMain.handle("utility:counter-clear", async () => {
+    counterStore.set("currentValue", 0)
+    counterStore.set("history", [])
+
+    return {
+      currentValue: 0,
+      history: []
+    }
+  })
+
+  ipcMain.handle("utility:timer-alarm-get", async () => {
+    const alarms = timerAlarmStore.get("alarms").map((alarm) => ({
+      ...alarm,
+      dismissed: Boolean((alarm as Partial<AlarmStoreItem>).dismissed)
+    }))
+
+    return {
+      elapsed: timerAlarmStore.get("elapsed"),
+      laps: timerAlarmStore.get("laps"),
+      countdownRemaining: timerAlarmStore.get("countdownRemaining"),
+      alarms
+    }
+  })
+
+  ipcMain.handle(
+    "utility:timer-alarm-set",
+    async (
+      _event,
+      payload: {
+        elapsed: number
+        laps: TimerLapStoreItem[]
+        countdownRemaining: number
+        alarms: AlarmStoreItem[]
+      }
+    ) => {
+      const nextElapsed = Number.isFinite(payload.elapsed) ? Math.max(0, Math.trunc(payload.elapsed)) : 0
+      const nextLaps = Array.isArray(payload.laps) ? payload.laps : []
+      const nextCountdownRemaining = Number.isFinite(payload.countdownRemaining)
+        ? Math.max(0, Math.trunc(payload.countdownRemaining))
+        : 0
+      const nextAlarms = Array.isArray(payload.alarms)
+        ? payload.alarms.map((alarm) => ({
+            ...alarm,
+            dismissed: Boolean((alarm as Partial<AlarmStoreItem>).dismissed)
+          }))
+        : []
+
+      timerAlarmStore.set("elapsed", nextElapsed)
+      timerAlarmStore.set("laps", nextLaps)
+      timerAlarmStore.set("countdownRemaining", nextCountdownRemaining)
+      timerAlarmStore.set("alarms", nextAlarms)
+
+      return {
+        elapsed: nextElapsed,
+        laps: nextLaps,
+        countdownRemaining: nextCountdownRemaining,
+        alarms: nextAlarms
       }
     }
   )

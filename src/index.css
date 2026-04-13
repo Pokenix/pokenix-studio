@@ -681,6 +681,180 @@ body.light-theme .utility-code-block {
   gap: 12px;
 }
 
+.counter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.counter-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.counter-set-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.counter-set-input {
+  width: 140px;
+}
+
+.counter-big-button {
+  min-width: 180px;
+  min-height: 180px;
+  border: 0;
+  border-radius: 28px;
+  background: linear-gradient(135deg, #3abeff, #2563eb);
+  color: white;
+  font-size: 28px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.counter-value {
+  min-width: 140px;
+  font-size: 72px;
+  font-weight: 800;
+  line-height: 1;
+  color: #f8fafc;
+}
+
+body.light-theme .counter-value {
+  color: #111827;
+}
+
+.counter-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 1;
+  min-width: 0;
+}
+
+.counter-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #cbd5e1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+
+.counter-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.16);
+  color: #fca5a5;
+}
+
+.counter-delete-btn:active {
+  transform: scale(0.97);
+}
+
+body.light-theme .counter-delete-btn {
+  background: rgba(15, 23, 42, 0.06);
+  color: #64748b;
+}
+
+body.light-theme .counter-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+}
+
+.clock-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.clock-panel {
+  width: min(100%, 920px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  text-align: center;
+}
+
+.clock-date {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.clock-time {
+  margin: 0;
+  font-size: clamp(56px, 11vw, 132px);
+  font-weight: 800;
+  line-height: 0.95;
+  letter-spacing: -0.04em;
+  color: #f8fafc;
+}
+
+body.light-theme .clock-date {
+  color: #64748b;
+}
+
+body.light-theme .clock-time {
+  color: #111827;
+}
+
+.timer-alarm-page {
+  max-width: 980px;
+  padding: 12px 18px 18px;
+}
+
+.timer-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.timer-display {
+  font-size: clamp(42px, 10vw, 96px);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: #f8fafc;
+  text-align: center;
+}
+
+.timer-laps-group {
+  margin-bottom: 0;
+}
+
+.timer-alarm-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.timer-alarm-input {
+  width: 180px;
+}
+
+body.light-theme .timer-display {
+  color: #111827;
+}
+
 .todo-input-row {
   display: flex;
   gap: 12px;
