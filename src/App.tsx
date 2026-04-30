@@ -1,5 +1,5 @@
 import "./index.css"
-import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo, Hash, X, Clock3, Bell, FileText, Calculator, ScanLine } from "lucide-react"
+import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo, Hash, X, Clock3, Bell, FileText, Calculator, ScanLine, Binary } from "lucide-react"
 import jsQR from "jsqr"
 import QRCode from "qrcode"
 import { useEffect, useMemo, useRef, useState } from "react"
@@ -853,6 +853,229 @@ function renderMarkdownBlocks(markdown: string): React.ReactNode[] {
   }
 
   return blocks
+}
+
+const MORSE_CODE_MAP: Record<string, string> = {
+  A: ".-",
+  B: "-...",
+  C: "-.-.",
+  D: "-..",
+  E: ".",
+  F: "..-.",
+  G: "--.",
+  H: "....",
+  I: "..",
+  J: ".---",
+  K: "-.-",
+  L: ".-..",
+  M: "--",
+  N: "-.",
+  O: "---",
+  P: ".--.",
+  Q: "--.-",
+  R: ".-.",
+  S: "...",
+  T: "-",
+  U: "..-",
+  V: "...-",
+  W: ".--",
+  X: "-..-",
+  Y: "-.--",
+  Z: "--..",
+  0: "-----",
+  1: ".----",
+  2: "..---",
+  3: "...--",
+  4: "....-",
+  5: ".....",
+  6: "-....",
+  7: "--...",
+  8: "---..",
+  9: "----.",
+  ".": ".-.-.-",
+  ",": "--..--",
+  "?": "..--..",
+  "!": "-.-.--",
+  "-": "-....-",
+  "/": "-..-.",
+  "@": ".--.-.",
+  "(": "-.--.",
+  ")": "-.--.-",
+  "&": ".-..."
+}
+
+const MORSE_CODE_REVERSE_MAP = Object.fromEntries(
+  Object.entries(MORSE_CODE_MAP).map(([key, value]) => [value, key])
+)
+
+type EncodeDecodeMode = "morse" | "binary" | "hex" | "base64" | "url" | "integer"
+
+function textToUtf8Bytes(text: string) {
+  return Array.from(new TextEncoder().encode(text))
+}
+
+function utf8BytesToText(bytes: number[]) {
+  return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes))
+}
+
+function bytesToBase64(bytes: number[]) {
+  let binary = ""
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte)
+  })
+  return btoa(binary)
+}
+
+function base64ToBytes(value: string) {
+  const binary = atob(value)
+  return Array.from(binary, (char) => char.charCodeAt(0))
+}
+
+function encodeDecodeText(
+  mode: EncodeDecodeMode,
+  action: "encode" | "decode",
+  input: string
+): { success: true; output: string } | { success: false; error: string } {
+  const value = input.trim()
+
+  if (!value) {
+    return { success: false, error: "Enter some text first." }
+  }
+
+  try {
+    if (mode === "base64") {
+      return {
+        success: true,
+        output: action === "encode" ? bytesToBase64(textToUtf8Bytes(input)) : utf8BytesToText(base64ToBytes(value))
+      }
+    }
+
+    if (mode === "url") {
+      return {
+        success: true,
+        output: action === "encode" ? encodeURIComponent(input) : decodeURIComponent(value)
+      }
+    }
+
+    if (mode === "hex") {
+      if (action === "encode") {
+        return {
+          success: true,
+          output: textToUtf8Bytes(input)
+            .map((byte) => byte.toString(16).padStart(2, "0"))
+            .join(" ")
+        }
+      }
+
+      const normalized = value.replace(/[\s,]+/g, "")
+      if (!/^[0-9a-fA-F]+$/.test(normalized) || normalized.length % 2 !== 0) {
+        return { success: false, error: "Enter valid hex pairs like 50 6f 6b." }
+      }
+
+      const bytes = normalized.match(/.{1,2}/g)?.map((chunk) => Number.parseInt(chunk, 16)) || []
+      return { success: true, output: utf8BytesToText(bytes) }
+    }
+
+    if (mode === "binary") {
+      if (action === "encode") {
+        return {
+          success: true,
+          output: textToUtf8Bytes(input)
+            .map((byte) => byte.toString(2).padStart(8, "0"))
+            .join(" ")
+        }
+      }
+
+      const compact = value.replace(/\s+/g, "")
+      const chunks =
+        value.includes(" ") || value.includes("\n")
+          ? value.split(/\s+/).filter(Boolean)
+          : compact.match(/.{1,8}/g) || []
+
+      if (
+        chunks.length === 0 ||
+        chunks.some((chunk) => !/^[01]{8}$/.test(chunk))
+      ) {
+        return { success: false, error: "Enter binary as 8-bit groups like 01010000 01101111." }
+      }
+
+      return {
+        success: true,
+        output: utf8BytesToText(chunks.map((chunk) => Number.parseInt(chunk, 2)))
+      }
+    }
+
+    if (mode === "integer") {
+      if (action === "encode") {
+        return {
+          success: true,
+          output: Array.from(input)
+            .map((char) => char.codePointAt(0))
+            .filter((value): value is number => value !== undefined)
+            .join(" ")
+        }
+      }
+
+      const numbers = value
+        .split(/[\s,]+/)
+        .filter(Boolean)
+        .map((part) => Number.parseInt(part, 10))
+
+      if (
+        numbers.length === 0 ||
+        numbers.some((number) => Number.isNaN(number) || number < 0 || number > 1114111)
+      ) {
+        return { success: false, error: "Enter valid integers separated by spaces." }
+      }
+
+      return {
+        success: true,
+        output: numbers.map((number) => String.fromCodePoint(number)).join("")
+      }
+    }
+
+    if (mode === "morse") {
+      if (action === "encode") {
+        const words = input
+          .toUpperCase()
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((word) =>
+            Array.from(word)
+              .map((char) => MORSE_CODE_MAP[char] || char)
+              .join(" ")
+          )
+
+        return { success: true, output: words.join(" / ") }
+      }
+
+      const words = value
+        .split("/")
+        .map((word) => word.trim())
+        .filter(Boolean)
+
+      if (words.length === 0) {
+        return { success: false, error: "Enter Morse code like .--. --- -.- ." }
+      }
+
+      const decodedWords = words.map((word) => {
+        const letters = word.split(/\s+/).filter(Boolean)
+        return letters
+          .map((letter) => MORSE_CODE_REVERSE_MAP[letter])
+          .join("")
+      })
+
+      if (decodedWords.some((word) => word.includes("undefined"))) {
+        return { success: false, error: "Some Morse code groups could not be decoded." }
+      }
+
+      return { success: true, output: decodedWords.join(" ") }
+    }
+  } catch {
+    return { success: false, error: "That input could not be converted." }
+  }
+
+  return { success: false, error: "Unsupported mode." }
 }
 
 function SettingsPage({
@@ -2351,7 +2574,7 @@ function TimerAlarmPage() {
 }
 
 function UtilityToolsPage() {
-  const [activeTool, setActiveTool] = useState<"home" | "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools">("home")
+  const [activeTool, setActiveTool] = useState<"home" | "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode">("home")
   const [activeFileManagerTool, setActiveFileManagerTool] = useState<
     "home" | "create-files" | "move-files" | "directory-structure" | "file-watcher"
   >("home")
@@ -2390,7 +2613,7 @@ function UtilityToolsPage() {
   const [jsonPathMessage, setJsonPathMessage] = useState("")
   const [jsonArrayMessage, setJsonArrayMessage] = useState("")
   const [utilitySearchQuery, setUtilitySearchQuery] = useState("")
-  const [utilityToolRecency, setUtilityToolRecency] = useState<Array<"file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools">>([])
+  const [utilityToolRecency, setUtilityToolRecency] = useState<Array<"file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode">>([])
   const [markdownInput, setMarkdownInput] = useState(`# Markdown Preview
 
 Write your markdown on the left and see the preview on the right.
@@ -2415,6 +2638,10 @@ console.log("Pokenix Studio")
   const [qrReaderPreview, setQrReaderPreview] = useState("")
   const [qrReaderResult, setQrReaderResult] = useState("")
   const [qrReaderMessage, setQrReaderMessage] = useState("")
+  const [encodeDecodeMode, setEncodeDecodeMode] = useState<EncodeDecodeMode>("morse")
+  const [encodeDecodeInput, setEncodeDecodeInput] = useState("Pokenix Studio")
+  const [encodeDecodeOutput, setEncodeDecodeOutput] = useState("")
+  const [encodeDecodeMessage, setEncodeDecodeMessage] = useState("")
   const colorPickerRef = useRef<HTMLInputElement | null>(null)
 
   const parsedJson = useMemo(() => parseJsonInput(normalizeJsonInput(jsonInput)), [jsonInput])
@@ -2486,6 +2713,12 @@ console.log("Pokenix Studio")
         title: "QR Tools",
         description: "Create QR codes and read them from image files.",
         icon: <ScanLine size={22} />
+      },
+      {
+        id: "encode-decode" as const,
+        title: "Encode / Decode",
+        description: "Convert text with Morse, Base64, Hex, Binary, URL, and Integer tools.",
+        icon: <Binary size={22} />
       }
     ],
     []
@@ -2527,7 +2760,7 @@ console.log("Pokenix Studio")
       if (!Array.isArray(parsed)) return
 
       const validIds = parsed.filter(
-        (value): value is "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" =>
+        (value): value is "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode" =>
           typeof value === "string"
       )
       setUtilityToolRecency(validIds)
@@ -2537,7 +2770,7 @@ console.log("Pokenix Studio")
   }, [])
 
   const openUtilityTool = (
-    toolId: "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools"
+    toolId: "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode"
   ) => {
     setActiveTool(toolId)
     setUtilityToolRecency((current) => {
@@ -2861,6 +3094,42 @@ console.log("Pokenix Studio")
       }
     }
   }, [qrReaderPreview])
+
+  const encodeDecodeModes = useMemo(
+    () => [
+      {
+        id: "morse" as const,
+        title: "Morse",
+        description: "Dots and dashes for text."
+      },
+      {
+        id: "base64" as const,
+        title: "Base64",
+        description: "Common encoded text blocks."
+      },
+      {
+        id: "hex" as const,
+        title: "Hex",
+        description: "Hex byte pairs."
+      },
+      {
+        id: "binary" as const,
+        title: "Binary",
+        description: "8-bit binary groups."
+      },
+      {
+        id: "url" as const,
+        title: "URL",
+        description: "encodeURIComponent and decodeURIComponent."
+      },
+      {
+        id: "integer" as const,
+        title: "Integer",
+        description: "Character code points."
+      }
+    ],
+    []
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -3962,6 +4231,138 @@ console.log("Pokenix Studio")
           <pre className="utility-code-block utility-code-block-small">
             {qrReaderResult || "Choose an image file to read its QR code."}
           </pre>
+        </div>
+      </div>
+    )
+  }
+
+  if (activeTool === "encode-decode") {
+    const activeEncodeMode = encodeDecodeModes.find((mode) => mode.id === encodeDecodeMode)
+
+    const runEncodeDecode = (action: "encode" | "decode") => {
+      const result = encodeDecodeText(encodeDecodeMode, action, encodeDecodeInput)
+
+      if (!result.success) {
+        setEncodeDecodeOutput("")
+        setEncodeDecodeMessage(result.error)
+        return
+      }
+
+      setEncodeDecodeOutput(result.output)
+      setEncodeDecodeMessage(action === "encode" ? "Encoded." : "Decoded.")
+    }
+
+    return (
+      <div className="settings-page utility-page">
+        <button
+          className="utility-back-btn"
+          onClick={() => {
+            setActiveTool("home")
+          }}
+          type="button"
+        >
+          <ArrowLeft size={16} />
+          <span>Back</span>
+        </button>
+
+        <h1>Encode / Decode</h1>
+        <p className="page-subtitle">Convert text between common formats like Morse, Base64, Binary, Hex, URL, and Integer.</p>
+
+        <div className="settings-group">
+          <h3>Mode</h3>
+          <div className="encode-decode-mode-grid">
+            {encodeDecodeModes.map((mode) => (
+              <button
+                className={`encode-decode-mode-btn ${mode.id === encodeDecodeMode ? "encode-decode-mode-btn-active" : ""}`}
+                key={mode.id}
+                onClick={() => {
+                  setEncodeDecodeMode(mode.id)
+                  setEncodeDecodeMessage("")
+                }}
+                type="button"
+              >
+                <strong>{mode.title}</strong>
+                <span>{mode.description}</span>
+              </button>
+            ))}
+          </div>
+          <p className="encode-decode-mode-note">
+            Current mode: <strong>{activeEncodeMode?.title}</strong>
+          </p>
+        </div>
+
+        <div className="settings-group">
+          <h3>Input</h3>
+          <textarea
+            className="notepad-editor utility-json-editor"
+            onChange={(event) => {
+              setEncodeDecodeInput(event.target.value)
+              setEncodeDecodeMessage("")
+            }}
+            spellCheck={false}
+            value={encodeDecodeInput}
+          />
+          <div className="settings-action-row">
+            <button className="notepad-action-btn" onClick={() => runEncodeDecode("encode")} type="button">
+              Encode
+            </button>
+            <button className="notepad-action-btn" onClick={() => runEncodeDecode("decode")} type="button">
+              Decode
+            </button>
+            <button
+              className="notepad-action-btn"
+              disabled={!encodeDecodeOutput}
+              onClick={() => {
+                setEncodeDecodeInput(encodeDecodeOutput)
+                setEncodeDecodeOutput("")
+                setEncodeDecodeMessage("Output moved to input.")
+              }}
+              type="button"
+            >
+              Swap
+            </button>
+            <button
+              className="notepad-action-btn"
+              disabled={!encodeDecodeOutput}
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(encodeDecodeOutput)
+                  setEncodeDecodeMessage("Output copied.")
+                } catch {
+                  setEncodeDecodeMessage("Could not copy the output.")
+                }
+              }}
+              type="button"
+            >
+              Copy Output
+            </button>
+            <button
+              className="notepad-action-btn"
+              onClick={() => {
+                setEncodeDecodeInput("")
+                setEncodeDecodeOutput("")
+                setEncodeDecodeMessage("")
+              }}
+              type="button"
+            >
+              Clear
+            </button>
+          </div>
+          {encodeDecodeMessage ? (
+            <p className={`utility-message ${encodeDecodeMessage.endsWith(".") && !encodeDecodeMessage.startsWith("Could not") && !encodeDecodeMessage.startsWith("Enter ") ? "" : "utility-message-error"}`}>
+              {encodeDecodeMessage}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="settings-group">
+          <h3>Output</h3>
+          <textarea
+            className="notepad-editor utility-json-editor"
+            readOnly
+            spellCheck={false}
+            value={encodeDecodeOutput}
+          />
         </div>
       </div>
     )
@@ -5547,7 +5948,15 @@ export default function App() {
         "json",
         "qr",
         "qr tools",
-        "qr code"
+        "qr code",
+        "encode",
+        "decode",
+        "morse",
+        "base64",
+        "binary",
+        "hex",
+        "url",
+        "integer"
       ]
     },
     {

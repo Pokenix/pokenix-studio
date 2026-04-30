@@ -503,6 +503,28 @@ function getFocusedAppWindow() {
   return BrowserWindow.getFocusedWindow() ?? (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null)
 }
 
+function getDialogParentWindow() {
+  const focusedWindow = BrowserWindow.getFocusedWindow()
+
+  if (
+    focusedWindow &&
+    !focusedWindow.isDestroyed() &&
+    (!updateProgressWindow || focusedWindow.id !== updateProgressWindow.id)
+  ) {
+    return focusedWindow
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return mainWindow
+  }
+
+  const fallbackWindow = BrowserWindow.getAllWindows().find(
+    (window) => !window.isDestroyed() && (!updateProgressWindow || window.id !== updateProgressWindow.id)
+  )
+
+  return fallbackWindow || null
+}
+
 function createOrShowUpdateProgressWindow(version: string) {
   if (updateProgressWindow && !updateProgressWindow.isDestroyed()) {
     updateProgressWindow.show()
@@ -644,8 +666,9 @@ async function promptToInstallDownloadedUpdate(version: string) {
   promptedDownloadedUpdateVersion = version
   logInfo(`Update downloaded: ${version}.`)
   closeUpdateProgressWindow()
+  await new Promise((resolve) => setTimeout(resolve, 120))
 
-  const focusedWindow = getFocusedAppWindow()
+  const dialogParentWindow = getDialogParentWindow()
 
   const messageBoxOptions = {
     type: "info" as const,
@@ -657,8 +680,8 @@ async function promptToInstallDownloadedUpdate(version: string) {
     detail: "Restart the app now to finish updating."
   }
 
-  const result = focusedWindow
-    ? await dialog.showMessageBox(focusedWindow, messageBoxOptions)
+  const result = dialogParentWindow
+    ? await dialog.showMessageBox(dialogParentWindow, messageBoxOptions)
     : await dialog.showMessageBox(messageBoxOptions)
 
   if (result.response === 0) {
@@ -670,7 +693,7 @@ async function promptToInstallDownloadedUpdate(version: string) {
 function configureAutoUpdater() {
   autoUpdater.logger = updaterLogger
   autoUpdater.autoDownload = false
-  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.autoInstallOnAppQuit = false
 
   autoUpdater.on("checking-for-update", () => {
     logInfo("Checking for app updates.")

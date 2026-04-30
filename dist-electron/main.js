@@ -327,6 +327,19 @@ const updaterLogger = {
 function getFocusedAppWindow() {
     return electron_1.BrowserWindow.getFocusedWindow() ?? (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
 }
+function getDialogParentWindow() {
+    const focusedWindow = electron_1.BrowserWindow.getFocusedWindow();
+    if (focusedWindow &&
+        !focusedWindow.isDestroyed() &&
+        (!updateProgressWindow || focusedWindow.id !== updateProgressWindow.id)) {
+        return focusedWindow;
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        return mainWindow;
+    }
+    const fallbackWindow = electron_1.BrowserWindow.getAllWindows().find((window) => !window.isDestroyed() && (!updateProgressWindow || window.id !== updateProgressWindow.id));
+    return fallbackWindow || null;
+}
 function createOrShowUpdateProgressWindow(version) {
     if (updateProgressWindow && !updateProgressWindow.isDestroyed()) {
         updateProgressWindow.show();
@@ -459,7 +472,8 @@ async function promptToInstallDownloadedUpdate(version) {
     promptedDownloadedUpdateVersion = version;
     logInfo(`Update downloaded: ${version}.`);
     closeUpdateProgressWindow();
-    const focusedWindow = getFocusedAppWindow();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const dialogParentWindow = getDialogParentWindow();
     const messageBoxOptions = {
         type: "info",
         buttons: ["Restart Now", "Later"],
@@ -469,8 +483,8 @@ async function promptToInstallDownloadedUpdate(version) {
         message: `Pokenix Studio ${version} is ready to install.`,
         detail: "Restart the app now to finish updating."
     };
-    const result = focusedWindow
-        ? await electron_1.dialog.showMessageBox(focusedWindow, messageBoxOptions)
+    const result = dialogParentWindow
+        ? await electron_1.dialog.showMessageBox(dialogParentWindow, messageBoxOptions)
         : await electron_1.dialog.showMessageBox(messageBoxOptions);
     if (result.response === 0) {
         logInfo(`Installing downloaded update ${version}.`);
@@ -480,7 +494,7 @@ async function promptToInstallDownloadedUpdate(version) {
 function configureAutoUpdater() {
     electron_updater_1.autoUpdater.logger = updaterLogger;
     electron_updater_1.autoUpdater.autoDownload = false;
-    electron_updater_1.autoUpdater.autoInstallOnAppQuit = true;
+    electron_updater_1.autoUpdater.autoInstallOnAppQuit = false;
     electron_updater_1.autoUpdater.on("checking-for-update", () => {
         logInfo("Checking for app updates.");
     });
