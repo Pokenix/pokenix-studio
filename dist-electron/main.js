@@ -491,6 +491,31 @@ async function promptToInstallDownloadedUpdate(version) {
         electron_updater_1.autoUpdater.quitAndInstall();
     }
 }
+async function triggerManualUpdateCheck() {
+    if (!electron_1.app.isPackaged) {
+        const focusedWindow = getFocusedAppWindow();
+        const options = {
+            type: "info",
+            buttons: ["OK"],
+            defaultId: 0,
+            title: "Unavailable in Development",
+            message: "Check for updates is only available in the packaged app."
+        };
+        await (focusedWindow
+            ? electron_1.dialog.showMessageBox(focusedWindow, options)
+            : electron_1.dialog.showMessageBox(options));
+        return { success: false, reason: "not-packaged" };
+    }
+    manualUpdateCheckRequested = true;
+    try {
+        await electron_updater_1.autoUpdater.checkForUpdates();
+        return { success: true };
+    }
+    catch (error) {
+        manualUpdateCheckRequested = false;
+        throw error;
+    }
+}
 function configureAutoUpdater() {
     electron_updater_1.autoUpdater.logger = updaterLogger;
     electron_updater_1.autoUpdater.autoDownload = false;
@@ -1960,7 +1985,19 @@ function createTray() {
                     label: "Open Main Window",
                     click: () => showMainWindow()
                 },
-            { type: "separator" },
+            {
+                label: "Check for Updates",
+                enabled: electron_1.app.isPackaged,
+                click: () => {
+                    void triggerManualUpdateCheck().catch((error) => {
+                        logError(`Failed to check for updates from tray: ${error instanceof Error ? error.message : "Unknown error."}`);
+                    });
+                }
+            },
+            {
+                label: "Settings",
+                click: () => navigateMainWindow("settings")
+            },
             {
                 label: "Quit",
                 click: () => {
@@ -1971,7 +2008,7 @@ function createTray() {
         ]);
         tray?.popUpContextMenu(contextMenu);
     };
-    tray.on("click", showTrayMenu);
+    tray.on("click", () => showMainWindow());
     tray.on("right-click", showTrayMenu);
 }
 function stopUtilityWatcher(webContentsId) {
@@ -2024,18 +2061,7 @@ function registerIpcHandlers() {
         return { success: true };
     });
     electron_1.ipcMain.handle("app:check-for-updates", async () => {
-        if (!electron_1.app.isPackaged) {
-            return { success: false, reason: "not-packaged" };
-        }
-        manualUpdateCheckRequested = true;
-        try {
-            await electron_updater_1.autoUpdater.checkForUpdates();
-            return { success: true };
-        }
-        catch (error) {
-            manualUpdateCheckRequested = false;
-            throw error;
-        }
+        return triggerManualUpdateCheck();
     });
     electron_1.ipcMain.handle("app:open-logs-directory", async () => {
         await promises_1.default.mkdir(getLogsDirectory(), { recursive: true });

@@ -690,6 +690,35 @@ async function promptToInstallDownloadedUpdate(version: string) {
   }
 }
 
+async function triggerManualUpdateCheck() {
+  if (!app.isPackaged) {
+    const focusedWindow = getFocusedAppWindow()
+    const options = {
+      type: "info" as const,
+      buttons: ["OK"],
+      defaultId: 0,
+      title: "Unavailable in Development",
+      message: "Check for updates is only available in the packaged app."
+    }
+
+    await (focusedWindow
+      ? dialog.showMessageBox(focusedWindow, options)
+      : dialog.showMessageBox(options))
+
+    return { success: false, reason: "not-packaged" as const }
+  }
+
+  manualUpdateCheckRequested = true
+
+  try {
+    await autoUpdater.checkForUpdates()
+    return { success: true }
+  } catch (error) {
+    manualUpdateCheckRequested = false
+    throw error
+  }
+}
+
 function configureAutoUpdater() {
   autoUpdater.logger = updaterLogger
   autoUpdater.autoDownload = false
@@ -2507,7 +2536,23 @@ function createTray() {
             label: "Open Main Window",
             click: () => showMainWindow()
           },
-      { type: "separator" },
+      {
+        label: "Check for Updates",
+        enabled: app.isPackaged,
+        click: () => {
+          void triggerManualUpdateCheck().catch((error) => {
+            logError(
+              `Failed to check for updates from tray: ${
+                error instanceof Error ? error.message : "Unknown error."
+              }`
+            )
+          })
+        }
+      },
+      {
+        label: "Settings",
+        click: () => navigateMainWindow("settings")
+      },
       {
         label: "Quit",
         click: () => {
@@ -2520,7 +2565,7 @@ function createTray() {
     tray?.popUpContextMenu(contextMenu)
   }
 
-  tray.on("click", showTrayMenu)
+  tray.on("click", () => showMainWindow())
   tray.on("right-click", showTrayMenu)
 }
 
@@ -2592,19 +2637,7 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle("app:check-for-updates", async () => {
-    if (!app.isPackaged) {
-      return { success: false, reason: "not-packaged" as const }
-    }
-
-    manualUpdateCheckRequested = true
-
-    try {
-      await autoUpdater.checkForUpdates()
-      return { success: true }
-    } catch (error) {
-      manualUpdateCheckRequested = false
-      throw error
-    }
+    return triggerManualUpdateCheck()
   })
 
   ipcMain.handle("app:open-logs-directory", async () => {
