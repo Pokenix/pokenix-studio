@@ -51,9 +51,30 @@ type SettingsStore = {
   darkTheme: boolean
   openNewTabs: boolean
   developerMode: boolean
+  actionsWarningDismissed: boolean
+  favoriteModules: ModuleId[]
+  favoriteUtilityTools: UtilityToolId[]
 }
 
 type Page = "home" | "plugins" | "themes" | "settings" | "console"
+
+type ModuleId =
+  | "notepad"
+  | "todo-list"
+  | "counter"
+  | "clock"
+  | "timer-alarm"
+  | "calculator"
+  | "utility-tools"
+  | "pokenix-actions"
+
+type UtilityToolId =
+  | "file-manager"
+  | "color-tools"
+  | "json-tools"
+  | "markdown-tools"
+  | "qr-tools"
+  | "encode-decode"
 
 type NotesStore = {
   notepadContent: string
@@ -208,7 +229,30 @@ const defaultSettings: SettingsStore = {
   closeToTray: true,
   darkTheme: true,
   openNewTabs: true,
-  developerMode: false
+  developerMode: false,
+  actionsWarningDismissed: false,
+  favoriteModules: [],
+  favoriteUtilityTools: []
+}
+
+const MODULE_LABELS: Record<ModuleId, string> = {
+  notepad: "Notepad",
+  "todo-list": "To-Do List",
+  counter: "Counter",
+  clock: "Clock",
+  "timer-alarm": "Timer & Alarm",
+  calculator: "Calculator",
+  "utility-tools": "Utility Tools",
+  "pokenix-actions": "Pokenix Actions"
+}
+
+const UTILITY_TOOL_LABELS: Record<UtilityToolId, string> = {
+  "file-manager": "File Manager",
+  "color-tools": "Color Tools",
+  "json-tools": "JSON Tools",
+  "markdown-tools": "Markdown Tools",
+  "qr-tools": "QR Tools",
+  "encode-decode": "Encode / Decode"
 }
 
 let settingsStore: StoreLike<SettingsStore>
@@ -364,8 +408,51 @@ function getSettings(): SettingsStore {
     closeToTray: settingsStore.get("closeToTray"),
     darkTheme: settingsStore.get("darkTheme"),
     openNewTabs: settingsStore.get("openNewTabs"),
-    developerMode: settingsStore.get("developerMode")
+    developerMode: settingsStore.get("developerMode"),
+    actionsWarningDismissed: settingsStore.get("actionsWarningDismissed"),
+    favoriteModules: settingsStore.get("favoriteModules") || [],
+    favoriteUtilityTools: settingsStore.get("favoriteUtilityTools") || []
   }
+}
+
+function getFavoriteModules() {
+  return (settingsStore.get("favoriteModules") || []).filter(
+    (moduleId): moduleId is ModuleId => typeof moduleId === "string" && moduleId in MODULE_LABELS
+  )
+}
+
+function setFavoriteModules(next: ModuleId[]) {
+  settingsStore.set("favoriteModules", Array.from(new Set(next)))
+}
+
+function toggleFavoriteModule(moduleId: ModuleId, favorited: boolean) {
+  const current = getFavoriteModules()
+  const next = favorited
+    ? [...current.filter((item) => item !== moduleId), moduleId]
+    : current.filter((item) => item !== moduleId)
+
+  setFavoriteModules(next)
+  return next
+}
+
+function getFavoriteUtilityTools() {
+  return (settingsStore.get("favoriteUtilityTools") || []).filter(
+    (toolId): toolId is UtilityToolId => typeof toolId === "string" && toolId in UTILITY_TOOL_LABELS
+  )
+}
+
+function setFavoriteUtilityTools(next: UtilityToolId[]) {
+  settingsStore.set("favoriteUtilityTools", Array.from(new Set(next)))
+}
+
+function toggleFavoriteUtilityTool(toolId: UtilityToolId, favorited: boolean) {
+  const current = getFavoriteUtilityTools()
+  const next = favorited
+    ? [...current.filter((item) => item !== toolId), toolId]
+    : current.filter((item) => item !== toolId)
+
+  setFavoriteUtilityTools(next)
+  return next
 }
 
 function updateLoginItemSettings() {
@@ -1381,6 +1468,18 @@ function notifyPluginStateChanged() {
   }
 }
 
+function notifyFavoritesReset() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("app:favorites-reset")
+  }
+
+  for (const win of moduleWindows.values()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send("app:favorites-reset")
+    }
+  }
+}
+
 async function readPluginRecord(pluginDirectory: string): Promise<PluginRecord | null> {
   const manifestPath = path.join(pluginDirectory, "manifest.json")
 
@@ -2300,10 +2399,18 @@ async function handleNotepadWindowClose(win: BrowserWindow, event: Electron.Even
   }
 }
 
-function createModuleWindow(moduleId: string, title: string) {
+function createModuleWindow(moduleId: string, title: string, extraQuery?: string) {
+  const query = `module=${encodeURIComponent(moduleId)}${extraQuery ? `&${extraQuery}` : ""}`
+  const moduleUrl = isDev
+    ? `${process.env.VITE_DEV_SERVER_URL}?${query}`
+    : `file://${path.join(__dirname, "../dist/index.html")}?${query}`
+
   const existingWindow = moduleWindows.get(moduleId)
 
   if (existingWindow && !existingWindow.isDestroyed()) {
+    if (extraQuery) {
+      void existingWindow.loadURL(moduleUrl)
+    }
     existingWindow.show()
     existingWindow.focus()
     logInfo(`Focused existing module window: ${moduleId}`)
@@ -2334,10 +2441,6 @@ function createModuleWindow(moduleId: string, title: string) {
 
   attachWindowStateSave("notepad", moduleWindow)
 
-  const moduleUrl = isDev
-    ? `${process.env.VITE_DEV_SERVER_URL}?module=${moduleId}`
-    : `file://${path.join(__dirname, "../dist/index.html")}?module=${moduleId}`
-
   void moduleWindow.loadURL(moduleUrl)
   logInfo(`Opened module window: ${moduleId}`)
 
@@ -2354,6 +2457,17 @@ function createModuleWindow(moduleId: string, title: string) {
   })
 
   moduleWindows.set(moduleId, moduleWindow)
+}
+
+function openModuleWindowById(moduleId: ModuleId) {
+  const title = MODULE_LABELS[moduleId]
+  createModuleWindow(moduleId, title)
+  return { success: true }
+}
+
+function openUtilityToolWindowById(toolId: UtilityToolId) {
+  createModuleWindow("utility-tools", MODULE_LABELS["utility-tools"], `utilityTool=${encodeURIComponent(toolId)}`)
+  return { success: true }
 }
 
 async function createPluginWindow(pluginId: string) {
@@ -2525,6 +2639,23 @@ function createTray() {
 
   const showTrayMenu = () => {
     const mainVisible = isUsableWindow(mainWindow) ? mainWindow.isVisible() : false
+    const favoriteModules = getFavoriteModules()
+    const favoriteUtilityTools = getFavoriteUtilityTools()
+    const quickLaunchSubmenu = favoriteModules.map((moduleId) => ({
+      label: MODULE_LABELS[moduleId],
+      click: () => {
+        openModuleWindowById(moduleId)
+      }
+    }))
+    const quickLaunchItems = [
+      ...quickLaunchSubmenu,
+      ...favoriteUtilityTools.map((toolId) => ({
+        label: UTILITY_TOOL_LABELS[toolId],
+        click: () => {
+          openUtilityToolWindowById(toolId)
+        }
+      }))
+    ]
 
     const contextMenu = Menu.buildFromTemplate([
       mainVisible
@@ -2536,6 +2667,14 @@ function createTray() {
             label: "Open Main Window",
             click: () => showMainWindow()
           },
+      ...(quickLaunchItems.length > 0
+        ? [
+            {
+              label: "Quick Launch",
+              submenu: quickLaunchItems
+            } as const
+          ]
+        : []),
       {
         label: "Check for Updates",
         enabled: app.isPackaged,
@@ -2644,6 +2783,104 @@ function registerIpcHandlers() {
     await fs.mkdir(getLogsDirectory(), { recursive: true })
     await shell.openPath(getLogsDirectory())
     return { success: true }
+  })
+
+  ipcMain.handle("actions:choose-file", async (event) => {
+    const parentWindow = BrowserWindow.fromWebContents(event.sender) ?? getFocusedAppWindow()
+
+    const result = parentWindow
+      ? await dialog.showOpenDialog(parentWindow, {
+          properties: ["openFile"],
+          filters: [{ name: "Pokenix Action Files", extensions: ["action"] }]
+        })
+      : await dialog.showOpenDialog({
+          properties: ["openFile"],
+          filters: [{ name: "Pokenix Action Files", extensions: ["action"] }]
+        })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { success: false }
+    }
+
+    const filePath = result.filePaths[0]
+
+    if (path.extname(filePath).toLowerCase() !== ".action") {
+      return {
+        success: false,
+        error: "Only .action files are allowed."
+      }
+    }
+
+    try {
+      const content = await fs.readFile(filePath, "utf8")
+      return {
+        success: true,
+        path: filePath,
+        content
+      }
+    } catch (error) {
+      logError(
+        `Failed to read action file: ${error instanceof Error ? error.message : "Unknown error."}`
+      )
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Could not read the action file."
+      }
+    }
+  })
+
+  ipcMain.handle("actions:warning-state", () => {
+    return {
+      dismissed: settingsStore.get("actionsWarningDismissed")
+    }
+  })
+
+  ipcMain.handle("actions:set-warning-dismissed", (_event, dismissed: boolean) => {
+    settingsStore.set("actionsWarningDismissed", Boolean(dismissed))
+    return {
+      success: true,
+      dismissed: settingsStore.get("actionsWarningDismissed")
+    }
+  })
+
+  ipcMain.handle("actions:export-log", async (event, content: string) => {
+    const parentWindow = BrowserWindow.fromWebContents(event.sender) ?? getFocusedAppWindow()
+    const now = new Date()
+    const pad = (value: number) => String(value).padStart(2, "0")
+    const filename = `pokenix-actions ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}-${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}.log`
+
+    try {
+      const result = parentWindow
+        ? await dialog.showSaveDialog(parentWindow, {
+            title: "Export Action Log",
+            defaultPath: path.join(app.getPath("desktop"), filename),
+            filters: [{ name: "Log Files", extensions: ["log"] }]
+          })
+        : await dialog.showSaveDialog({
+            title: "Export Action Log",
+            defaultPath: path.join(app.getPath("desktop"), filename),
+            filters: [{ name: "Log Files", extensions: ["log"] }]
+          })
+
+      if (result.canceled || !result.filePath) {
+        return { success: false, error: "Export cancelled." }
+      }
+
+      await fs.writeFile(result.filePath, String(content ?? ""), "utf8")
+
+      return {
+        success: true,
+        path: result.filePath
+      }
+    } catch (error) {
+      logError(
+        `Failed to export action log: ${error instanceof Error ? error.message : "Unknown error."}`
+      )
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Could not export the action log."
+      }
+    }
   })
 
   ipcMain.handle("plugins:status", async () => {
@@ -2990,8 +3227,12 @@ function registerIpcHandlers() {
       settingsStore.set("darkTheme", defaultSettings.darkTheme)
       settingsStore.set("openNewTabs", defaultSettings.openNewTabs)
       settingsStore.set("developerMode", defaultSettings.developerMode)
+      settingsStore.set("actionsWarningDismissed", defaultSettings.actionsWarningDismissed)
+      settingsStore.set("favoriteModules", defaultSettings.favoriteModules)
+      settingsStore.set("favoriteUtilityTools", defaultSettings.favoriteUtilityTools)
 
       updateLoginItemSettings()
+      notifyFavoritesReset()
 
       return {
         success: true,
@@ -3013,25 +3254,41 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle("module:open", (_event, moduleId: string) => {
-    const moduleMap: Record<string, string> = {
-      notepad: "Notepad",
-      "todo-list": "To-Do List",
-      counter: "Counter",
-      clock: "Clock",
-      "timer-alarm": "Timer & Alarm",
-      calculator: "Calculator",
-      "utility-tools": "Utility Tools",
-      "pokenix-actions": "Pokenix Actions"
-    }
-
-    const title = moduleMap[moduleId]
-
-    if (!title) {
+    if (!(moduleId in MODULE_LABELS)) {
       return { success: false }
     }
 
-    createModuleWindow(moduleId, title)
-    return { success: true }
+    return openModuleWindowById(moduleId as ModuleId)
+  })
+
+  ipcMain.handle("modules:favorites-list", () => {
+    return getFavoriteModules()
+  })
+
+  ipcMain.handle("modules:favorite-set", (_event, moduleId: ModuleId, favorited: boolean) => {
+    if (!(moduleId in MODULE_LABELS)) {
+      return { success: false, favorites: getFavoriteModules() }
+    }
+
+    const favorites = toggleFavoriteModule(moduleId, favorited)
+    logInfo(`Module favorite updated: ${moduleId}=${String(favorited)}`)
+
+    return { success: true, favorites }
+  })
+
+  ipcMain.handle("utility-tools:favorites-list", () => {
+    return getFavoriteUtilityTools()
+  })
+
+  ipcMain.handle("utility-tools:favorite-set", (_event, toolId: UtilityToolId, favorited: boolean) => {
+    if (!(toolId in UTILITY_TOOL_LABELS)) {
+      return { success: false, favorites: getFavoriteUtilityTools() }
+    }
+
+    const favorites = toggleFavoriteUtilityTool(toolId, favorited)
+    logInfo(`Utility tool favorite updated: ${toolId}=${String(favorited)}`)
+
+    return { success: true, favorites }
   })
 
   ipcMain.handle("window-state:reset", () => {

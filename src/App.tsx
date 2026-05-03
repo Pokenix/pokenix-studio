@@ -1,5 +1,5 @@
 import "./index.css"
-import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo, Hash, X, Clock3, Bell, FileText, Calculator, ScanLine, Binary } from "lucide-react"
+import { Home, NotebookPen, Settings, Search, Replace, Plug, Palette, TerminalSquare, Wrench, ArrowLeft, FolderKanban, FolderOpen, Blocks, ListTodo, Hash, X, Clock3, Bell, FileText, Calculator, ScanLine, Binary, Star } from "lucide-react"
 import jsQR from "jsqr"
 import QRCode from "qrcode"
 import { useEffect, useMemo, useRef, useState } from "react"
@@ -13,6 +13,9 @@ type AppSettings = {
   darkTheme: boolean
   openNewTabs: boolean
   developerMode: boolean
+  actionsWarningDismissed?: boolean
+  favoriteModules?: ModuleId[]
+  favoriteUtilityTools?: UtilityToolId[]
 }
 
 type ModuleId = "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "calculator" | "utility-tools" | "pokenix-actions"
@@ -25,6 +28,8 @@ type ModuleItem = {
   searchTerms?: string[]
   badge?: string
 }
+
+type UtilityToolId = "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode"
 
 type SettingsSetResponse = {
   success: boolean
@@ -177,6 +182,8 @@ declare global {
       }
       modules: {
         open: (moduleId: ModuleId) => Promise<{ success: boolean }>
+        favorites: () => Promise<ModuleId[]>
+        setFavorite: (moduleId: ModuleId, favorited: boolean) => Promise<{ success: boolean; favorites: ModuleId[] }>
       }
       todos: {
         list: () => Promise<{ items: TodoItem[]; moveCompletedToBottom: boolean }>
@@ -217,12 +224,21 @@ declare global {
         openExternalUrl: (url: string) => Promise<{ success: boolean }>
         checkForUpdates: () => Promise<{ success: boolean; reason?: "not-packaged" }>
         openLogsDirectory: () => Promise<{ success: boolean }>
+        onFavoritesReset: (callback: () => void) => () => void
         onNavigate: (callback: (page: Page) => void) => () => void
+      }
+      actions: {
+        chooseFile: () => Promise<{ success: boolean; path?: string; content?: string; error?: string }>
+        warningState: () => Promise<{ dismissed: boolean }>
+        setWarningDismissed: (dismissed: boolean) => Promise<{ success: boolean; dismissed: boolean }>
+        exportLog: (content: string) => Promise<{ success: boolean; path?: string; error?: string }>
       }
       windowState: {
         reset: () => Promise<{ success: boolean }>
       }
-  utility: {
+      utility: {
+        favorites: () => Promise<UtilityToolId[]>
+        setFavorite: (toolId: UtilityToolId, favorited: boolean) => Promise<{ success: boolean; favorites: UtilityToolId[] }>
         chooseDirectory: () => Promise<{ success: boolean; path?: string }>
         openDirectory: (directoryPath: string) => Promise<{ success: boolean }>
         startFileWatcher: (
@@ -338,10 +354,14 @@ declare global {
 
 function HomePage({
   modules,
-  onOpenModule
+  favoriteModules,
+  onOpenModule,
+  onToggleFavorite
 }: {
   modules: ModuleItem[]
+  favoriteModules: ModuleId[]
   onOpenModule: (moduleId: ModuleId) => void
+  onToggleFavorite: (moduleId: ModuleId, favorited: boolean) => void
 }) {
   const [moduleQuery, setModuleQuery] = useState("")
 
@@ -383,20 +403,35 @@ function HomePage({
 
         <div className="module-grid">
           {filteredModules.map((module) => (
-            <button
-              key={module.id}
-              className="module-card"
-              onClick={() => {
-                onOpenModule(module.id)
-              }}
-            >
-              <div className="module-icon">{module.icon}</div>
-              <div className="module-info">
-                {module.badge ? <span className="module-badge">{module.badge}</span> : null}
-                <h3>{module.title}</h3>
-                <p>{module.description}</p>
-              </div>
-            </button>
+            <div key={module.id} className="module-card-shell">
+              <button
+                className="module-card module-card-home"
+                onClick={() => {
+                  onOpenModule(module.id)
+                }}
+                type="button"
+              >
+                <div className="module-icon">{module.icon}</div>
+                <div className="module-info">
+                  {module.badge ? <span className="module-badge">{module.badge}</span> : null}
+                  <h3>{module.title}</h3>
+                  <p>{module.description}</p>
+                </div>
+              </button>
+
+              <button
+                aria-label={favoriteModules.includes(module.id) ? `Remove ${module.title} from quick launch` : `Add ${module.title} to quick launch`}
+                className={`module-favorite-btn ${favoriteModules.includes(module.id) ? "module-favorite-btn-active" : ""}`}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onToggleFavorite(module.id, !favoriteModules.includes(module.id))
+                }}
+                type="button"
+              >
+                <Star fill={favoriteModules.includes(module.id) ? "currentColor" : "none"} size={16} />
+              </button>
+            </div>
           ))}
         </div>
 
@@ -1076,6 +1111,114 @@ function encodeDecodeText(
   }
 
   return { success: false, error: "Unsupported mode." }
+}
+
+type PokenixActionStep = {
+  openURL?: string
+}
+
+type PokenixActionDocument = {
+  "pokenix-studio": "action"
+  version: string
+  actions: PokenixActionStep[]
+}
+
+const INVALID_ACTION_CODE_MESSAGE = "The entered code is not valid."
+
+function parsePokenixActionsDocument(input: string): { success: true; document: PokenixActionDocument } | { success: false; error: string } {
+  try {
+    const parsed = JSON.parse(input) as Partial<PokenixActionDocument>
+
+    if (parsed["pokenix-studio"] !== "action") {
+      return { success: false, error: INVALID_ACTION_CODE_MESSAGE }
+    }
+
+    if (typeof parsed.version !== "string" || !parsed.version.trim()) {
+      return { success: false, error: INVALID_ACTION_CODE_MESSAGE }
+    }
+
+    if (!Array.isArray(parsed.actions)) {
+      return { success: false, error: INVALID_ACTION_CODE_MESSAGE }
+    }
+
+    for (const step of parsed.actions) {
+      if (!step || typeof step !== "object") {
+        return { success: false, error: INVALID_ACTION_CODE_MESSAGE }
+      }
+
+      const keys = Object.keys(step)
+      if (keys.length !== 1 || keys[0] !== "openURL") {
+        return { success: false, error: INVALID_ACTION_CODE_MESSAGE }
+      }
+
+      if (typeof (step as PokenixActionStep).openURL !== "string" || !(step as PokenixActionStep).openURL?.trim()) {
+        return { success: false, error: INVALID_ACTION_CODE_MESSAGE }
+      }
+    }
+
+    return {
+      success: true,
+      document: {
+        "pokenix-studio": "action",
+        version: parsed.version,
+        actions: parsed.actions as PokenixActionStep[]
+      }
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: INVALID_ACTION_CODE_MESSAGE
+    }
+  }
+}
+
+async function runPokenixActionsDocument(
+  document: PokenixActionDocument
+): Promise<{ success: true; logs: string[] } | { success: false; error: string; logs: string[] }> {
+  const logs: string[] = []
+
+  for (let index = 0; index < document.actions.length; index += 1) {
+    const step = document.actions[index]
+
+    if (!step || typeof step !== "object") {
+      return {
+        success: false,
+        error: `Action ${index + 1} is not a valid object.`,
+        logs
+      }
+    }
+
+    if ("openURL" in step) {
+      if (typeof step.openURL !== "string" || !step.openURL.trim()) {
+        return {
+          success: false,
+          error: `Action ${index + 1} needs a valid openURL string.`,
+          logs
+        }
+      }
+
+      const result = await window.hubAPI.app.openExternalUrl(step.openURL)
+
+      if (!result.success) {
+        return {
+          success: false,
+          error: `Action ${index + 1} could not open the URL.`,
+          logs: [...logs, `${index + 1}. openURL -> failed (${step.openURL})`]
+        }
+      }
+
+      logs.push(`${index + 1}. openURL -> success (${step.openURL})`)
+      continue
+    }
+
+    return {
+      success: false,
+      error: `Action ${index + 1} uses an unknown action key.`,
+      logs
+    }
+  }
+
+  return { success: true, logs }
 }
 
 function SettingsPage({
@@ -1795,6 +1938,254 @@ function CounterPage() {
             type="button"
           >
             Clear
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PokenixActionsPage() {
+  const [codeInput, setCodeInput] = useState("")
+  const [selectedFilePath, setSelectedFilePath] = useState("")
+  const [selectedFileContent, setSelectedFileContent] = useState("")
+  const [actionMessage, setActionMessage] = useState("")
+  const [actionLogs, setActionLogs] = useState<string[]>([])
+  const [appVersion, setAppVersion] = useState("")
+  const [showWarning, setShowWarning] = useState(false)
+  const [dismissWarningForever, setDismissWarningForever] = useState(false)
+
+  useEffect(() => {
+    const loadWarningState = async () => {
+      const result = await window.hubAPI.actions.warningState()
+      setShowWarning(!result.dismissed)
+    }
+
+    void loadWarningState()
+  }, [])
+
+  useEffect(() => {
+    const loadVersion = async () => {
+      const version = await window.hubAPI.app.version()
+      setAppVersion(version)
+    }
+
+    void loadVersion()
+  }, [])
+
+  const effectiveCode = codeInput.trim() ? codeInput : selectedFileContent
+  const canRun = Boolean(effectiveCode.trim())
+
+  const runActions = async () => {
+    const sourceLabel = codeInput.trim()
+      ? "Input code"
+      : selectedFilePath
+        ? `File: ${selectedFilePath.split(/[\\/]/).pop() || selectedFilePath}`
+        : "Unknown source"
+    const initialLogs = [
+      "Started action run.",
+      `Source: ${sourceLabel}`
+    ]
+
+    const parsed = parsePokenixActionsDocument(effectiveCode)
+
+    if (!parsed.success) {
+      setActionMessage(parsed.error)
+      setActionLogs([...initialLogs, "Validation failed.", `Reason: ${parsed.error}`])
+      return
+    }
+
+    initialLogs.push(`Action version: ${parsed.document.version}`)
+    if (appVersion) {
+      initialLogs.push(`App version: ${appVersion}`)
+    }
+
+    if (appVersion && parsed.document.version !== appVersion) {
+      setActionMessage(
+        `Version mismatch. Action version is ${parsed.document.version}, but Pokenix Studio is ${appVersion}.`
+      )
+
+      const shouldContinue = window.confirm(
+        `Action version (${parsed.document.version}) does not match the current app version (${appVersion}).\n\nAre you sure you want to continue?`
+      )
+
+      if (!shouldContinue) {
+        setActionLogs([
+          ...initialLogs,
+          "Version mismatch detected.",
+          "User chose not to continue."
+        ])
+        return
+      }
+
+      initialLogs.push("Version mismatch confirmed by user.")
+    } else if (appVersion) {
+      initialLogs.push("Version check passed.")
+    }
+
+    const result = await runPokenixActionsDocument(parsed.document)
+
+    if (!result.success) {
+      setActionMessage(result.error)
+      setActionLogs([
+        ...initialLogs,
+        ...result.logs,
+        `Stopped. Reason: ${result.error}`
+      ])
+      return
+    }
+
+    setActionMessage("Actions completed.")
+    setActionLogs([
+      ...initialLogs,
+      ...result.logs,
+      `Finished. ${parsed.document.actions.length} action${parsed.document.actions.length === 1 ? "" : "s"} completed.`
+    ])
+  }
+
+  return (
+    <div className="module-page pokenix-actions-page">
+      {showWarning ? (
+        <div className="actions-warning-overlay">
+          <div className="actions-warning-dialog">
+            <h2>Pokenix Actions Warning</h2>
+            <p>
+              Please do not run code you do not understand when using Pokenix Actions.
+            </p>
+            <label className="utility-toggle-item actions-warning-checkbox">
+              <input
+                checked={dismissWarningForever}
+                onChange={(event) => setDismissWarningForever(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Don't show this again</span>
+            </label>
+            <div className="settings-action-row actions-warning-actions">
+              <button
+                className="notepad-action-btn"
+                onClick={async () => {
+                  if (dismissWarningForever) {
+                    await window.hubAPI.actions.setWarningDismissed(true)
+                  }
+                  setShowWarning(false)
+                }}
+                type="button"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <h1>Pokenix Actions</h1>
+      <p className="page-subtitle">Only run Actions you trust.</p>
+
+      <div className="pokenix-actions-grid">
+        <div className="settings-group">
+          <h3>Action code</h3>
+          <textarea
+            className="notepad-editor utility-json-editor"
+            onChange={(event) => {
+              setCodeInput(event.target.value)
+              setActionMessage("")
+            }}
+            placeholder={`{\n  "pokenix-studio": "action",\n  "version": "1.0.0",\n  "actions": [\n    { "openURL": "https://www.pokenix.com" }\n  ]\n}`}
+            spellCheck={false}
+            value={codeInput}
+          />
+          <div className="settings-action-row">
+            <button
+              className="notepad-clear-btn"
+              disabled={!codeInput}
+              onClick={() => {
+                setCodeInput("")
+                setActionMessage("")
+              }}
+              type="button"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-group">
+          <h3>Action file</h3>
+          <p>{selectedFilePath || "No .action file selected yet."}</p>
+          <div className="settings-action-row">
+            <button
+              className="notepad-action-btn"
+              onClick={async () => {
+                const result = await window.hubAPI.actions.chooseFile()
+                if (!result.success || !result.path || result.content === undefined) {
+                  if (result.error) {
+                    setActionMessage(result.error)
+                  }
+                  return
+                }
+
+                setSelectedFilePath(result.path)
+                setSelectedFileContent(result.content)
+                setActionMessage("")
+              }}
+              type="button"
+            >
+              Choose .action File
+            </button>
+            <button
+              className="notepad-clear-btn"
+              disabled={!selectedFilePath}
+              onClick={() => {
+                setSelectedFilePath("")
+                setSelectedFileContent("")
+              }}
+              type="button"
+            >
+              Clear File
+            </button>
+          </div>
+          <p className="pokenix-actions-note">
+            If both action code and a file are provided, the pasted code is used first.
+          </p>
+        </div>
+      </div>
+
+      <div className="settings-group">
+        <button
+          className="notepad-action-btn pokenix-actions-run-btn"
+          disabled={!canRun}
+          onClick={() => {
+            void runActions()
+          }}
+          type="button"
+        >
+          Run
+        </button>
+        {actionMessage ? (
+          <p className={`utility-message pokenix-actions-status ${actionMessage === "Actions completed." ? "" : "utility-message-error"}`}>
+            {actionMessage}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="settings-group">
+        <h3>Run log</h3>
+        <pre className="utility-code-block utility-code-block-small">
+          {actionLogs.length > 0 ? actionLogs.join("\n") : "No actions have been run yet."}
+        </pre>
+        <div className="settings-action-row">
+          <button
+            className="notepad-action-btn"
+            disabled={actionLogs.length === 0}
+            onClick={async () => {
+              const result = await window.hubAPI.actions.exportLog(actionLogs.join("\n"))
+              if (!result.success && result.error !== "Export cancelled.") {
+                setActionMessage(result.error || "Could not export the action log.")
+              }
+            }}
+            type="button"
+          >
+            Export Log
           </button>
         </div>
       </div>
@@ -2574,7 +2965,26 @@ function TimerAlarmPage() {
 }
 
 function UtilityToolsPage() {
-  const [activeTool, setActiveTool] = useState<"home" | "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode">("home")
+  const initialUtilityTool = useMemo(() => {
+    const params = new URLSearchParams(window.location.search)
+    const utilityTool = params.get("utilityTool")
+    const validTools: UtilityToolId[] = [
+      "file-manager",
+      "color-tools",
+      "json-tools",
+      "markdown-tools",
+      "qr-tools",
+      "encode-decode"
+    ]
+
+    if (utilityTool && validTools.includes(utilityTool as UtilityToolId)) {
+      return utilityTool as UtilityToolId
+    }
+
+    return "home" as const
+  }, [])
+
+  const [activeTool, setActiveTool] = useState<"home" | UtilityToolId>(initialUtilityTool)
   const [activeFileManagerTool, setActiveFileManagerTool] = useState<
     "home" | "create-files" | "move-files" | "directory-structure" | "file-watcher"
   >("home")
@@ -2613,7 +3023,8 @@ function UtilityToolsPage() {
   const [jsonPathMessage, setJsonPathMessage] = useState("")
   const [jsonArrayMessage, setJsonArrayMessage] = useState("")
   const [utilitySearchQuery, setUtilitySearchQuery] = useState("")
-  const [utilityToolRecency, setUtilityToolRecency] = useState<Array<"file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode">>([])
+  const [utilityToolRecency, setUtilityToolRecency] = useState<UtilityToolId[]>([])
+  const [favoriteUtilityTools, setFavoriteUtilityTools] = useState<UtilityToolId[]>([])
   const [markdownInput, setMarkdownInput] = useState(`# Markdown Preview
 
 Write your markdown on the left and see the preview on the right.
@@ -2759,25 +3170,43 @@ console.log("Pokenix Studio")
       const parsed = JSON.parse(raw)
       if (!Array.isArray(parsed)) return
 
-      const validIds = parsed.filter(
-        (value): value is "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode" =>
-          typeof value === "string"
-      )
+      const validIds = parsed.filter((value): value is UtilityToolId => typeof value === "string")
       setUtilityToolRecency(validIds)
     } catch {
       setUtilityToolRecency([])
     }
   }, [])
 
-  const openUtilityTool = (
-    toolId: "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode"
-  ) => {
+  useEffect(() => {
+    const loadFavorites = async () => {
+      const favorites = await window.hubAPI.utility.favorites()
+      setFavoriteUtilityTools(favorites)
+    }
+
+    void loadFavorites()
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = window.hubAPI.app.onFavoritesReset(() => {
+      setFavoriteUtilityTools([])
+    })
+
+    return unsubscribe
+  }, [])
+
+  const openUtilityTool = (toolId: UtilityToolId) => {
     setActiveTool(toolId)
     setUtilityToolRecency((current) => {
       const next = [toolId, ...current.filter((item) => item !== toolId)]
       window.localStorage.setItem(UTILITY_TOOL_RECENCY_STORAGE_KEY, JSON.stringify(next))
       return next
     })
+  }
+
+  const toggleUtilityToolFavorite = async (toolId: UtilityToolId, favorited: boolean) => {
+    const result = await window.hubAPI.utility.setFavorite(toolId, favorited)
+    if (!result.success) return
+    setFavoriteUtilityTools(result.favorites)
   }
 
   const colorPreview = useMemo(() => {
@@ -4390,13 +4819,28 @@ console.log("Pokenix Studio")
 
       <div className="module-grid">
         {filteredUtilityToolCards.map((tool) => (
-          <button className="module-card" key={tool.id} onClick={() => openUtilityTool(tool.id)} type="button">
-            <div className="module-icon">{tool.icon}</div>
-            <div className="module-info">
-              <h3>{tool.title}</h3>
-              <p>{tool.description}</p>
-            </div>
-          </button>
+          <div className="module-card-shell" key={tool.id}>
+            <button className="module-card module-card-home" onClick={() => openUtilityTool(tool.id)} type="button">
+              <div className="module-icon">{tool.icon}</div>
+              <div className="module-info">
+                <h3>{tool.title}</h3>
+                <p>{tool.description}</p>
+              </div>
+            </button>
+
+            <button
+              aria-label={favoriteUtilityTools.includes(tool.id) ? `Remove ${tool.title} from quick launch` : `Add ${tool.title} to quick launch`}
+              className={`module-favorite-btn ${favoriteUtilityTools.includes(tool.id) ? "module-favorite-btn-active" : ""}`}
+              onClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                void toggleUtilityToolFavorite(tool.id, !favoriteUtilityTools.includes(tool.id))
+              }}
+              type="button"
+            >
+              <Star fill={favoriteUtilityTools.includes(tool.id) ? "currentColor" : "none"} size={16} />
+            </button>
+          </div>
         ))}
       </div>
 
@@ -5842,12 +6286,7 @@ function ModulePage() {
   }
 
   if (moduleId === "pokenix-actions") {
-    return (
-      <div className="module-page">
-        <h1>Pokenix Actions</h1>
-        <p>Coming soon...</p>
-      </div>
-    )
+    return <PokenixActionsPage />
   }
 
   if (pluginId) {
@@ -5888,6 +6327,7 @@ export default function App() {
     createConsoleIntroTimestamps
   )
   const [moduleRecency, setModuleRecency] = useState<ModuleId[]>([])
+  const [favoriteModules, setFavoriteModules] = useState<ModuleId[]>([])
 
   const modules: ModuleItem[] = [
     {
@@ -6009,13 +6449,20 @@ export default function App() {
     })
   }
 
+  const toggleModuleFavorite = async (moduleId: ModuleId, favorited: boolean) => {
+    const result = await window.hubAPI.modules.setFavorite(moduleId, favorited)
+    if (!result.success) return
+    setFavoriteModules(result.favorites)
+  }
+
   useEffect(() => {
     const load = async () => {
-      const [s, p, pluginStatus, pluginData] = await Promise.all([
+      const [s, p, pluginStatus, pluginData, favorites] = await Promise.all([
         window.hubAPI.settings.get(),
         window.hubAPI.settings.path(),
         window.hubAPI.plugins.status(),
-        window.hubAPI.plugins.list()
+        window.hubAPI.plugins.list(),
+        window.hubAPI.modules.favorites()
       ])
       const version = await window.hubAPI.app.version()
 
@@ -6026,6 +6473,7 @@ export default function App() {
       setPluginsPath(pluginStatus.path)
       setPluginsRuntimeInstalled(pluginStatus.runtimeInstalled)
       setPlugins(pluginData.plugins)
+      setFavoriteModules(favorites)
     }
 
     void load()
@@ -6047,6 +6495,14 @@ export default function App() {
 
     return unsubscribe
   }, [settings.developerMode])
+
+  useEffect(() => {
+    const unsubscribe = window.hubAPI.app.onFavoritesReset(() => {
+      setFavoriteModules([])
+    })
+
+    return unsubscribe
+  }, [])
 
   useEffect(() => {
     if (page === "console" && !settings.developerMode) {
@@ -6245,7 +6701,14 @@ export default function App() {
       </aside>
 
       <main className="main-content">
-        {page === "home" && <HomePage modules={sortedModules} onOpenModule={openModule} />}
+        {page === "home" && (
+          <HomePage
+            modules={sortedModules}
+            favoriteModules={favoriteModules}
+            onOpenModule={openModule}
+            onToggleFavorite={toggleModuleFavorite}
+          />
+        )}
         {page === "plugins" && (
           <PluginsPage
             pluginsEnabled={pluginsEnabled}

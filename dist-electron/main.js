@@ -70,7 +70,28 @@ const defaultSettings = {
     closeToTray: true,
     darkTheme: true,
     openNewTabs: true,
-    developerMode: false
+    developerMode: false,
+    actionsWarningDismissed: false,
+    favoriteModules: [],
+    favoriteUtilityTools: []
+};
+const MODULE_LABELS = {
+    notepad: "Notepad",
+    "todo-list": "To-Do List",
+    counter: "Counter",
+    clock: "Clock",
+    "timer-alarm": "Timer & Alarm",
+    calculator: "Calculator",
+    "utility-tools": "Utility Tools",
+    "pokenix-actions": "Pokenix Actions"
+};
+const UTILITY_TOOL_LABELS = {
+    "file-manager": "File Manager",
+    "color-tools": "Color Tools",
+    "json-tools": "JSON Tools",
+    "markdown-tools": "Markdown Tools",
+    "qr-tools": "QR Tools",
+    "encode-decode": "Encode / Decode"
 };
 let settingsStore;
 let notesStore;
@@ -210,8 +231,39 @@ function getSettings() {
         closeToTray: settingsStore.get("closeToTray"),
         darkTheme: settingsStore.get("darkTheme"),
         openNewTabs: settingsStore.get("openNewTabs"),
-        developerMode: settingsStore.get("developerMode")
+        developerMode: settingsStore.get("developerMode"),
+        actionsWarningDismissed: settingsStore.get("actionsWarningDismissed"),
+        favoriteModules: settingsStore.get("favoriteModules") || [],
+        favoriteUtilityTools: settingsStore.get("favoriteUtilityTools") || []
     };
+}
+function getFavoriteModules() {
+    return (settingsStore.get("favoriteModules") || []).filter((moduleId) => typeof moduleId === "string" && moduleId in MODULE_LABELS);
+}
+function setFavoriteModules(next) {
+    settingsStore.set("favoriteModules", Array.from(new Set(next)));
+}
+function toggleFavoriteModule(moduleId, favorited) {
+    const current = getFavoriteModules();
+    const next = favorited
+        ? [...current.filter((item) => item !== moduleId), moduleId]
+        : current.filter((item) => item !== moduleId);
+    setFavoriteModules(next);
+    return next;
+}
+function getFavoriteUtilityTools() {
+    return (settingsStore.get("favoriteUtilityTools") || []).filter((toolId) => typeof toolId === "string" && toolId in UTILITY_TOOL_LABELS);
+}
+function setFavoriteUtilityTools(next) {
+    settingsStore.set("favoriteUtilityTools", Array.from(new Set(next)));
+}
+function toggleFavoriteUtilityTool(toolId, favorited) {
+    const current = getFavoriteUtilityTools();
+    const next = favorited
+        ? [...current.filter((item) => item !== toolId), toolId]
+        : current.filter((item) => item !== toolId);
+    setFavoriteUtilityTools(next);
+    return next;
 }
 function updateLoginItemSettings() {
     if (isDev)
@@ -1039,6 +1091,16 @@ function notifyPluginStateChanged() {
         mainWindow.webContents.send("plugins:state-changed");
     }
 }
+function notifyFavoritesReset() {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("app:favorites-reset");
+    }
+    for (const win of moduleWindows.values()) {
+        if (!win.isDestroyed()) {
+            win.webContents.send("app:favorites-reset");
+        }
+    }
+}
 async function readPluginRecord(pluginDirectory) {
     const manifestPath = node_path_1.default.join(pluginDirectory, "manifest.json");
     try {
@@ -1794,9 +1856,16 @@ async function handleNotepadWindowClose(win, event) {
         forceCloseWindowIds.delete(win.id);
     }
 }
-function createModuleWindow(moduleId, title) {
+function createModuleWindow(moduleId, title, extraQuery) {
+    const query = `module=${encodeURIComponent(moduleId)}${extraQuery ? `&${extraQuery}` : ""}`;
+    const moduleUrl = isDev
+        ? `${process.env.VITE_DEV_SERVER_URL}?${query}`
+        : `file://${node_path_1.default.join(__dirname, "../dist/index.html")}?${query}`;
     const existingWindow = moduleWindows.get(moduleId);
     if (existingWindow && !existingWindow.isDestroyed()) {
+        if (extraQuery) {
+            void existingWindow.loadURL(moduleUrl);
+        }
         existingWindow.show();
         existingWindow.focus();
         logInfo(`Focused existing module window: ${moduleId}`);
@@ -1823,9 +1892,6 @@ function createModuleWindow(moduleId, title) {
         }
     });
     attachWindowStateSave("notepad", moduleWindow);
-    const moduleUrl = isDev
-        ? `${process.env.VITE_DEV_SERVER_URL}?module=${moduleId}`
-        : `file://${node_path_1.default.join(__dirname, "../dist/index.html")}?module=${moduleId}`;
     void moduleWindow.loadURL(moduleUrl);
     logInfo(`Opened module window: ${moduleId}`);
     if (moduleId === "notepad") {
@@ -1839,6 +1905,15 @@ function createModuleWindow(moduleId, title) {
         logInfo(`Closed module window: ${moduleId}`);
     });
     moduleWindows.set(moduleId, moduleWindow);
+}
+function openModuleWindowById(moduleId) {
+    const title = MODULE_LABELS[moduleId];
+    createModuleWindow(moduleId, title);
+    return { success: true };
+}
+function openUtilityToolWindowById(toolId) {
+    createModuleWindow("utility-tools", MODULE_LABELS["utility-tools"], `utilityTool=${encodeURIComponent(toolId)}`);
+    return { success: true };
 }
 async function createPluginWindow(pluginId) {
     const pluginData = await getPluginById(pluginId);
@@ -1975,6 +2050,23 @@ function createTray() {
     tray.setToolTip("Pokenix Studio");
     const showTrayMenu = () => {
         const mainVisible = isUsableWindow(mainWindow) ? mainWindow.isVisible() : false;
+        const favoriteModules = getFavoriteModules();
+        const favoriteUtilityTools = getFavoriteUtilityTools();
+        const quickLaunchSubmenu = favoriteModules.map((moduleId) => ({
+            label: MODULE_LABELS[moduleId],
+            click: () => {
+                openModuleWindowById(moduleId);
+            }
+        }));
+        const quickLaunchItems = [
+            ...quickLaunchSubmenu,
+            ...favoriteUtilityTools.map((toolId) => ({
+                label: UTILITY_TOOL_LABELS[toolId],
+                click: () => {
+                    openUtilityToolWindowById(toolId);
+                }
+            }))
+        ];
         const contextMenu = electron_1.Menu.buildFromTemplate([
             mainVisible
                 ? {
@@ -1985,6 +2077,14 @@ function createTray() {
                     label: "Open Main Window",
                     click: () => showMainWindow()
                 },
+            ...(quickLaunchItems.length > 0
+                ? [
+                    {
+                        label: "Quick Launch",
+                        submenu: quickLaunchItems
+                    }
+                ]
+                : []),
             {
                 label: "Check for Updates",
                 enabled: electron_1.app.isPackaged,
@@ -2067,6 +2167,89 @@ function registerIpcHandlers() {
         await promises_1.default.mkdir(getLogsDirectory(), { recursive: true });
         await electron_1.shell.openPath(getLogsDirectory());
         return { success: true };
+    });
+    electron_1.ipcMain.handle("actions:choose-file", async (event) => {
+        const parentWindow = electron_1.BrowserWindow.fromWebContents(event.sender) ?? getFocusedAppWindow();
+        const result = parentWindow
+            ? await electron_1.dialog.showOpenDialog(parentWindow, {
+                properties: ["openFile"],
+                filters: [{ name: "Pokenix Action Files", extensions: ["action"] }]
+            })
+            : await electron_1.dialog.showOpenDialog({
+                properties: ["openFile"],
+                filters: [{ name: "Pokenix Action Files", extensions: ["action"] }]
+            });
+        if (result.canceled || result.filePaths.length === 0) {
+            return { success: false };
+        }
+        const filePath = result.filePaths[0];
+        if (node_path_1.default.extname(filePath).toLowerCase() !== ".action") {
+            return {
+                success: false,
+                error: "Only .action files are allowed."
+            };
+        }
+        try {
+            const content = await promises_1.default.readFile(filePath, "utf8");
+            return {
+                success: true,
+                path: filePath,
+                content
+            };
+        }
+        catch (error) {
+            logError(`Failed to read action file: ${error instanceof Error ? error.message : "Unknown error."}`);
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : "Could not read the action file."
+            };
+        }
+    });
+    electron_1.ipcMain.handle("actions:warning-state", () => {
+        return {
+            dismissed: settingsStore.get("actionsWarningDismissed")
+        };
+    });
+    electron_1.ipcMain.handle("actions:set-warning-dismissed", (_event, dismissed) => {
+        settingsStore.set("actionsWarningDismissed", Boolean(dismissed));
+        return {
+            success: true,
+            dismissed: settingsStore.get("actionsWarningDismissed")
+        };
+    });
+    electron_1.ipcMain.handle("actions:export-log", async (event, content) => {
+        const parentWindow = electron_1.BrowserWindow.fromWebContents(event.sender) ?? getFocusedAppWindow();
+        const now = new Date();
+        const pad = (value) => String(value).padStart(2, "0");
+        const filename = `pokenix-actions ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}-${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}.log`;
+        try {
+            const result = parentWindow
+                ? await electron_1.dialog.showSaveDialog(parentWindow, {
+                    title: "Export Action Log",
+                    defaultPath: node_path_1.default.join(electron_1.app.getPath("desktop"), filename),
+                    filters: [{ name: "Log Files", extensions: ["log"] }]
+                })
+                : await electron_1.dialog.showSaveDialog({
+                    title: "Export Action Log",
+                    defaultPath: node_path_1.default.join(electron_1.app.getPath("desktop"), filename),
+                    filters: [{ name: "Log Files", extensions: ["log"] }]
+                });
+            if (result.canceled || !result.filePath) {
+                return { success: false, error: "Export cancelled." };
+            }
+            await promises_1.default.writeFile(result.filePath, String(content ?? ""), "utf8");
+            return {
+                success: true,
+                path: result.filePath
+            };
+        }
+        catch (error) {
+            logError(`Failed to export action log: ${error instanceof Error ? error.message : "Unknown error."}`);
+            return {
+                success: false,
+                error: error instanceof Error ? error.message : "Could not export the action log."
+            };
+        }
     });
     electron_1.ipcMain.handle("plugins:status", async () => {
         return {
@@ -2329,7 +2512,11 @@ function registerIpcHandlers() {
             settingsStore.set("darkTheme", defaultSettings.darkTheme);
             settingsStore.set("openNewTabs", defaultSettings.openNewTabs);
             settingsStore.set("developerMode", defaultSettings.developerMode);
+            settingsStore.set("actionsWarningDismissed", defaultSettings.actionsWarningDismissed);
+            settingsStore.set("favoriteModules", defaultSettings.favoriteModules);
+            settingsStore.set("favoriteUtilityTools", defaultSettings.favoriteUtilityTools);
             updateLoginItemSettings();
+            notifyFavoritesReset();
             return {
                 success: true,
                 settings: getSettings(),
@@ -2347,22 +2534,32 @@ function registerIpcHandlers() {
         }
     });
     electron_1.ipcMain.handle("module:open", (_event, moduleId) => {
-        const moduleMap = {
-            notepad: "Notepad",
-            "todo-list": "To-Do List",
-            counter: "Counter",
-            clock: "Clock",
-            "timer-alarm": "Timer & Alarm",
-            calculator: "Calculator",
-            "utility-tools": "Utility Tools",
-            "pokenix-actions": "Pokenix Actions"
-        };
-        const title = moduleMap[moduleId];
-        if (!title) {
+        if (!(moduleId in MODULE_LABELS)) {
             return { success: false };
         }
-        createModuleWindow(moduleId, title);
-        return { success: true };
+        return openModuleWindowById(moduleId);
+    });
+    electron_1.ipcMain.handle("modules:favorites-list", () => {
+        return getFavoriteModules();
+    });
+    electron_1.ipcMain.handle("modules:favorite-set", (_event, moduleId, favorited) => {
+        if (!(moduleId in MODULE_LABELS)) {
+            return { success: false, favorites: getFavoriteModules() };
+        }
+        const favorites = toggleFavoriteModule(moduleId, favorited);
+        logInfo(`Module favorite updated: ${moduleId}=${String(favorited)}`);
+        return { success: true, favorites };
+    });
+    electron_1.ipcMain.handle("utility-tools:favorites-list", () => {
+        return getFavoriteUtilityTools();
+    });
+    electron_1.ipcMain.handle("utility-tools:favorite-set", (_event, toolId, favorited) => {
+        if (!(toolId in UTILITY_TOOL_LABELS)) {
+            return { success: false, favorites: getFavoriteUtilityTools() };
+        }
+        const favorites = toggleFavoriteUtilityTool(toolId, favorited);
+        logInfo(`Utility tool favorite updated: ${toolId}=${String(favorited)}`);
+        return { success: true, favorites };
     });
     electron_1.ipcMain.handle("window-state:reset", () => {
         const mainState = {

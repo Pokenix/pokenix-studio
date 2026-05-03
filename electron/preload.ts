@@ -19,7 +19,12 @@ const hubAPI = {
 
   modules: {
     open: (moduleId: "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "calculator" | "utility-tools" | "pokenix-actions") =>
-      ipcRenderer.invoke("module:open", moduleId)
+      ipcRenderer.invoke("module:open", moduleId),
+    favorites: () => ipcRenderer.invoke("modules:favorites-list"),
+    setFavorite: (
+      moduleId: "notepad" | "todo-list" | "counter" | "clock" | "timer-alarm" | "calculator" | "utility-tools" | "pokenix-actions",
+      favorited: boolean
+    ) => ipcRenderer.invoke("modules:favorite-set", moduleId, favorited)
   },
 
   todos: {
@@ -96,6 +101,17 @@ const hubAPI = {
     openExternalUrl: (url: string) => ipcRenderer.invoke("app:open-external-url", url),
     checkForUpdates: () => ipcRenderer.invoke("app:check-for-updates"),
     openLogsDirectory: () => ipcRenderer.invoke("app:open-logs-directory"),
+    onFavoritesReset: (callback: () => void) => {
+      const listener = () => {
+        callback()
+      }
+
+      ipcRenderer.on("app:favorites-reset", listener)
+
+      return () => {
+        ipcRenderer.removeListener("app:favorites-reset", listener)
+      }
+    },
     onNavigate: (callback: (page: "home" | "plugins" | "themes" | "settings" | "console") => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
@@ -112,11 +128,24 @@ const hubAPI = {
     }
   },
 
+  actions: {
+    chooseFile: () => ipcRenderer.invoke("actions:choose-file"),
+    warningState: () => ipcRenderer.invoke("actions:warning-state"),
+    setWarningDismissed: (dismissed: boolean) =>
+      ipcRenderer.invoke("actions:set-warning-dismissed", dismissed),
+    exportLog: (content: string) => ipcRenderer.invoke("actions:export-log", content)
+  },
+
   windowState: {
     reset: () => ipcRenderer.invoke("window-state:reset")
   },
 
   utility: {
+    favorites: () => ipcRenderer.invoke("utility-tools:favorites-list"),
+    setFavorite: (
+      toolId: "file-manager" | "color-tools" | "json-tools" | "markdown-tools" | "qr-tools" | "encode-decode",
+      favorited: boolean
+    ) => ipcRenderer.invoke("utility-tools:favorite-set", toolId, favorited),
     chooseDirectory: () => ipcRenderer.invoke("utility:choose-directory"),
     openDirectory: (directoryPath: string) => ipcRenderer.invoke("utility:open-directory", directoryPath),
     startFileWatcher: (directoryPath: string) => ipcRenderer.invoke("utility:start-file-watcher", directoryPath),

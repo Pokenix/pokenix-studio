@@ -9,7 +9,9 @@ const hubAPI = {
         reset: () => electron_1.ipcRenderer.invoke("settings:reset")
     },
     modules: {
-        open: (moduleId) => electron_1.ipcRenderer.invoke("module:open", moduleId)
+        open: (moduleId) => electron_1.ipcRenderer.invoke("module:open", moduleId),
+        favorites: () => electron_1.ipcRenderer.invoke("modules:favorites-list"),
+        setFavorite: (moduleId, favorited) => electron_1.ipcRenderer.invoke("modules:favorite-set", moduleId, favorited)
     },
     todos: {
         list: () => electron_1.ipcRenderer.invoke("todos:list"),
@@ -64,6 +66,15 @@ const hubAPI = {
         openExternalUrl: (url) => electron_1.ipcRenderer.invoke("app:open-external-url", url),
         checkForUpdates: () => electron_1.ipcRenderer.invoke("app:check-for-updates"),
         openLogsDirectory: () => electron_1.ipcRenderer.invoke("app:open-logs-directory"),
+        onFavoritesReset: (callback) => {
+            const listener = () => {
+                callback();
+            };
+            electron_1.ipcRenderer.on("app:favorites-reset", listener);
+            return () => {
+                electron_1.ipcRenderer.removeListener("app:favorites-reset", listener);
+            };
+        },
         onNavigate: (callback) => {
             const listener = (_event, page) => {
                 callback(page);
@@ -74,10 +85,18 @@ const hubAPI = {
             };
         }
     },
+    actions: {
+        chooseFile: () => electron_1.ipcRenderer.invoke("actions:choose-file"),
+        warningState: () => electron_1.ipcRenderer.invoke("actions:warning-state"),
+        setWarningDismissed: (dismissed) => electron_1.ipcRenderer.invoke("actions:set-warning-dismissed", dismissed),
+        exportLog: (content) => electron_1.ipcRenderer.invoke("actions:export-log", content)
+    },
     windowState: {
         reset: () => electron_1.ipcRenderer.invoke("window-state:reset")
     },
     utility: {
+        favorites: () => electron_1.ipcRenderer.invoke("utility-tools:favorites-list"),
+        setFavorite: (toolId, favorited) => electron_1.ipcRenderer.invoke("utility-tools:favorite-set", toolId, favorited),
         chooseDirectory: () => electron_1.ipcRenderer.invoke("utility:choose-directory"),
         openDirectory: (directoryPath) => electron_1.ipcRenderer.invoke("utility:open-directory", directoryPath),
         startFileWatcher: (directoryPath) => electron_1.ipcRenderer.invoke("utility:start-file-watcher", directoryPath),
